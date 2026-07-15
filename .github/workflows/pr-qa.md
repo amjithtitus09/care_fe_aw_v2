@@ -359,9 +359,10 @@ Your three possible outcomes (pick exactly one, see Step 7):
   a PR build failure), and you have a screenshot and concrete findings the fixer can act on.
 - **`state:human`** — verification was impossible for a reason that is **not the PR's
   fault**: an **infrastructure** failure (backend never came up, preview server unreachable,
-  the sandbox browser cannot reach the runner), or the **exact data state the PR changes could
-  not be seeded** through care's fixture API (Step 3). You escalate with an
-  actionable report instead of blaming the PR — or passing it on adjacent evidence.
+  the sandbox browser cannot reach the runner), or the required data state **could not be built even
+  after you tried** to construct it via care_fe's flows and the fixture bridge (Step 3d). You escalate
+  with an actionable report of what you *tried to build* — never merely because the data was absent
+  (that is a prerequisite to create in Step 3d), and never by passing on adjacent evidence.
 
 ## What you can and cannot run
 
@@ -526,29 +527,64 @@ existing baseline record wherever the setup project already discovered one.
 This is dynamic and general: any state the product can reach, you reach the same way the product's
 own tests do — no per-feature recipe baked into this workflow.
 
-### 3d. Prerequisite fallback (only if no UI flow can create it)
+### 3d. Build a named prerequisite yourself — do NOT escalate what you can name
 
-If a **backend-only prerequisite** genuinely has no UI/create flow (e.g. an admin-config record the
-app never creates itself), you may seed just that record through the validated fixture API — never
-raw ORM. Write a small script using care's `CareFixtureBase` and POST it to the seed bridge:
+**If you can name the exact data the feature needs, you can almost always create it — so create it,
+do not escalate.** Many features render only in a specific backend state the baseline fixtures don't
+include (e.g. ENG-503 renders multiple report forms only when the ActivityDefinition has **≥2
+`diagnostic_report_codes`**). That is a prerequisite to build, NOT a reason to hand off to a human.
 
-```bash
-cat care/care/fixtures/fixtures.md
-grep -n "def create_" care/care/fixtures/base.py
-curl -s -X POST http://host.docker.internal/__qa_seed --data-binary @/tmp/gh-aw/agent/qa-seed-1.py
-```
+Two ways to build it, in order of preference:
 
-The script opens `care_fixture_context()` and calls `base.create_*` (validated, commits on success;
-response ends `QA-SEED-EXIT: 0`). Use this ONLY for a true prerequisite the flow can't build; the
-feature's own entities must still be created through its real UI flow (3c) so QA proves the flow
-works. Cap: at most 3 attempts, fix the script from the traceback each time, never retry it verbatim.
+1. **Through care_fe's own admin/create UI**, if the app exposes one (many config records —
+   ActivityDefinitions, HealthcareServices, etc. — are created under facility settings). Reuse the
+   matching `tests/**` spec/helper exactly as in 3b/3c.
+2. **Through the validated fixture bridge** when there is no UI flow (or it is impractically deep).
+   Write a small `CareFixtureBase` script and POST it — this calls the same DRF viewsets the app
+   does, so the graph is valid (never raw ORM). Discover the method and its fields first:
 
-### 3e. Un-seedable => escalate honestly (never fake it)
+   ```bash
+   cat care/care/fixtures/fixtures.md
+   grep -nA20 "def create_activity_definition" care/care/fixtures/base.py   # or your entity
+   curl -s -X POST http://host.docker.internal/__qa_seed --data-binary @/tmp/gh-aw/agent/qa-seed-1.py
+   ```
 
-If after reusing the real flows you still cannot construct the exact state the PR changes, do **not**
-screenshot an adjacent surface and call it evidence. Go to Step 7 with **`state:human`** and an
-actionable report: `missing: <state> for <feature>; tried: <flows/specs reused + errors>; unblock:
-<the flow step or record that failed>`. That structured report is the run's deliverable.
+   Every `create_*` method forwards `**kwargs` into the request body, so feature-specific fields go
+   straight in — e.g. to satisfy ENG-503:
+
+   ```python
+   # /tmp/gh-aw/agent/qa-seed-1.py  (illustrative — read base.py for the exact required args)
+   from care.fixtures.context import care_fixture_context
+   with care_fixture_context() as base:
+       org = base.create_organization(name="QA Org")
+       facility = base.create_facility(org.id, name="QA Hospital")
+       ad = base.create_activity_definition(
+           facility.id, title="QA Multi-Code Panel", code=..., locations=[...],
+           specimen_requirements=[...], observation_result_requirements=[...],
+           charge_item_definitions=[...],
+           diagnostic_report_codes=[code_a, code_b],   # the ≥2 codes the feature needs
+       )
+       print("QA-SEED activity_definition", ad.slug)
+   ```
+
+The script opens `care_fixture_context()` (validated, commits on success; response ends
+`QA-SEED-EXIT: 0`). The feature's *own* entities should still be created through its real UI flow
+(3c) so QA proves that flow — use the bridge for the config/prerequisite records behind it. Cap: at
+most 4 attempts, fixing the script from each traceback; never resend an identical failing script.
+
+### 3e. Escalate ONLY when you cannot build it even knowing exactly what it is
+
+Escalation to `state:human` is a last resort for when the required state is genuinely unbuildable —
+NOT for a prerequisite you were able to name. Before escalating you must have actually **tried** to
+build the named prerequisite via 3d (a UI flow AND the fixture bridge) and hit a concrete blocker.
+If you can write the sentence "a human needs to create X", then X is something you should have
+created in 3d — go back and do it.
+
+If a build genuinely fails after those attempts, do **not** screenshot an adjacent surface and call
+it evidence. Go to Step 7 with **`state:human`** and an actionable report: `missing: <state> for
+<feature>; tried: <UI flow + fixture create_* calls, with the exact errors>; unblock: <the specific
+field/endpoint that rejected it>`. That structured report — proving you tried to build it, not just
+that it was absent — is the run's deliverable.
 ## Step 4 — Exercise and capture before/after screenshots (desktop AND mobile — both mandatory)
 
 You have two ways to capture evidence. **Prefer the scripted spec runner (A)** — it makes the
