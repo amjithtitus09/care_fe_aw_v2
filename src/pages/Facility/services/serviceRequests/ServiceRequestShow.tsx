@@ -605,8 +605,9 @@ export default function ServiceRequestShow({
                   const codeReports = diagnosticReports.filter(
                     (report) => report.code?.code === code.code,
                   );
-                  const isFinalForCode =
-                    codeReports[0]?.status === DiagnosticReportStatus.final;
+                  const isFinalForCode = codeReports.some(
+                    (report) => report.status === DiagnosticReportStatus.final,
+                  );
 
                   return (
                     <div key={code.code} className="space-y-3">
