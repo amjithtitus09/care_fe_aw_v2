@@ -1,0 +1,105 @@
+name: Pipeline — Watchdog
+
+# Crash-recovery sweeper for the linear pipeline (see docs/PIPELINE.md).
+#
+# The stage workflows are triggered by `state:*` labels, and gh-aw CONSUMES (removes) the trigger
+# label at activation. So between a stage starting and it writing the next state, an enrolled PR
+# briefly carries no state label — and if that stage crashes (runner OOM, cancelled run, provider
+# error) the PR is left with NO state label and silently stalls.
+#
+# This hourly job finds enrolled PRs (`jira-agent`) that carry no `state:*` label, reads the
+# authoritative append-only ledger comment, and — only if the last state transition is older than a
+# threshold (longer than any stage's max runtime, so a legitimately in-flight stage is never
+# disturbed) — re-applies the last known state to re-run that stage. Terminal states (`state:ready`,
+# `state:human`) are real labels, so terminal PRs are never touched.
+#
+# It is deterministic (no agent) and touches only labels/comments.
+
+on:
+  schedule:
+    - cron: "17 * * * *" # hourly, offset so it doesn't collide with on-the-hour load
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pipeline-watchdog
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-apply the last known state to stalled PRs
+        uses: actions/github-script@v8
+        env:
+          # PAT so a re-applied state:* label cascades to re-trigger its stage (a label written with
+          # the default GITHUB_TOKEN is suppressed by the recursion guard). Falls back to
+          # GITHUB_TOKEN (labels still get set, but the stage won't re-fire).
+          AGENT_TOKEN: ${{ secrets.GH_AW_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
+          # Minutes a PR may carry no state label before we consider its stage crashed. Must exceed
+          # the slowest label-gated stage (QA ~55m + backend boot) plus queue time.
+          STALL_MINUTES: "90"
+        with:
+          github-token: ${{ secrets.GH_AW_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const marker = "<!-- pipeline-state-ledger -->";
+            const stallMs = Number(process.env.STALL_MINUTES) * 60 * 1000;
+            const STATES = ["state:review", "state:qa", "state:rework", "state:ready", "state:human"];
+            // Stages we can re-run. Terminal states are intentionally excluded.
+            const RERUNNABLE = new Set(["state:review", "state:qa", "state:rework"]);
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: "open", per_page: 100,
+            });
+
+            let recovered = 0;
+            for (const pr of prs) {
+              const labels = pr.labels.map(l => l.name);
+              if (!labels.includes("jira-agent")) continue;
+              // Skip PRs that already carry a state label (in a defined stage or terminal).
+              if (labels.some(n => n.startsWith("state:"))) continue;
+
+              // Read the ledger to find the last state that was ADDED.
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              });
+              const ledger = comments.find(c => c.body && c.body.startsWith(marker));
+              if (!ledger) {
+                core.info(`PR #${pr.number}: no ledger yet — leaving to enroll.`);
+                continue;
+              }
+              const m = ledger.body.match(/```json\n([\s\S]*?)\n```/);
+              let entries = [];
+              if (m) { try { entries = JSON.parse(m[1]); } catch { entries = []; } }
+              const lastAdded = [...entries].reverse().find(
+                e => e.event === "labeled" && STATES.includes(e.label)
+              );
+              if (!lastAdded) {
+                core.info(`PR #${pr.number}: ledger has no state:* add — skipping.`);
+                continue;
+              }
+              if (!RERUNNABLE.has(lastAdded.label)) {
+                core.info(`PR #${pr.number}: last state ${lastAdded.label} is terminal — skipping.`);
+                continue;
+              }
+              const ageMs = Date.now() - new Date(lastAdded.ts).getTime();
+              if (ageMs < stallMs) {
+                core.info(`PR #${pr.number}: ${lastAdded.label} only ${Math.round(ageMs/60000)}m old — likely still running.`);
+                continue;
+              }
+              core.warning(`PR #${pr.number}: stalled with no state label for ${Math.round(ageMs/60000)}m — re-applying ${lastAdded.label}.`);
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: pr.number, labels: [lastAdded.label],
+              });
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pr.number,
+                body: `🐕 Pipeline watchdog: this PR lost its state label (a stage likely crashed). `
+                  + `Re-applied \`${lastAdded.label}\` to resume the pipeline.`,
+              });
+              recovered++;
+            }
+            core.info(`Watchdog swept ${prs.length} open PRs; recovered ${recovered}.`);
