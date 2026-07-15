@@ -21,6 +21,24 @@ Workflows only trigger from the repo's **default branch** (`repository_dispatch`
 
 Without the `JIRA_*` trio the pipeline still runs end to end — it just skips the Jira comments.
 
+### `COPILOT_GITHUB_TOKEN` — what access it needs
+
+This is the **model-inference** token (separate from the repo-write PAT below). The agentic stages
+use it to call the Copilot API (`api.githubcopilot.com`); it is *not* exposed to the model and does
+*not* need repo write.
+
+- **Access required:** the token's account must have an **active GitHub Copilot subscription/seat**
+  (Individual/Pro, Business, or Enterprise). That entitlement is the access being consumed. On a
+  personal repo, use a Copilot-licensed personal account (e.g. `amjithtitus09`).
+- **Create it, quickest:** from a `gh` CLI logged in as that Copilot-licensed account, run
+  `gh auth token` and paste the value into the secret.
+- **Create it, more stable:** a **classic PAT** (Settings → Developer settings → Tokens (classic))
+  with `repo` + `read:org`, from the Copilot-licensed account. Fine-grained PATs are unreliable for
+  the Copilot API — prefer classic or `gh auth token`.
+- **Alternative:** if this repo lived under an org with **centralized Copilot billing**, you could
+  drop this secret and set `permissions.copilot-requests: write` instead. That is not available for
+  a personal-account repo, so use the secret here.
+
 ### `GH_AW_AGENT_TOKEN` PAT scopes
 
 Create a **fine-grained PAT** (Settings → Developer settings → Fine-grained tokens), scoped to
