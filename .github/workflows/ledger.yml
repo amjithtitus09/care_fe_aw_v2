@@ -1,0 +1,81 @@
+name: Pipeline — Ledger
+
+# Deterministic, append-only state ledger for the linear pipeline (see docs/PIPELINE.md).
+#
+# Labels are great *triggers* but lousy *records*: a label can be removed by a bot, consumed by
+# gh-aw activation, or clobbered by a race — and the history is gone. This workflow appends every
+# observed `state:*` transition to a single per-PR ledger comment (a JSON block), giving humans and
+# the watchdog an authoritative, append-only history of the machine independent of the labels'
+# current values.
+#
+# It is read-and-append only: it NEVER writes labels and never influences the machine — it observes
+# it. Uses only GITHUB_TOKEN (comments need not cascade).
+
+on:
+  pull_request_target:
+    types: [labeled, unlabeled]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pipeline-ledger-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  ledger:
+    runs-on: ubuntu-latest
+    # Only state:* label churn on enrolled PRs is ledger-worthy.
+    if: >-
+      startsWith(github.event.label.name, 'state:') &&
+      contains(github.event.pull_request.labels.*.name, 'jira-agent') != false
+    steps:
+      - name: Append transition to the ledger comment
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          ACTOR: ${{ github.actor }}
+        with:
+          script: |
+            const marker = "<!-- pipeline-state-ledger -->";
+            const pr = Number(process.env.PR_NUMBER);
+            const entry = {
+              ts: new Date().toISOString(),
+              event: process.env.ACTION,       // labeled | unlabeled
+              label: process.env.LABEL,        // state:*
+              actor: process.env.ACTOR,
+              run: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            };
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pr, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            let entries = [];
+            if (existing) {
+              const m = existing.body.match(/```json\n([\s\S]*?)\n```/);
+              if (m) { try { entries = JSON.parse(m[1]); } catch { entries = []; } }
+            }
+            entries.push(entry);
+            // Bound the ledger so a pathological loop can't grow it unboundedly.
+            if (entries.length > 200) entries = entries.slice(-200);
+            const body = [
+              marker,
+              "### Pipeline state ledger",
+              "",
+              "Append-only record of `state:*` transitions for this PR (labels are triggers;",
+              "this comment is the authoritative history the watchdog reads).",
+              "",
+              "```json",
+              JSON.stringify(entries, null, 2),
+              "```",
+            ].join("\n");
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: pr, body });
+            }
+            core.info(`Ledger now has ${entries.length} entries for PR #${pr}.`);
