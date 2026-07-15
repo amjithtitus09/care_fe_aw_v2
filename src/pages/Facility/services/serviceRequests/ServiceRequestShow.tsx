@@ -616,9 +616,7 @@ export default function ServiceRequestShow({
                   const reportForCode = diagnosticReports.find(
                     (report) => report.code?.code === code.code,
                   );
-                  if (
-                    reportForCode?.status === DiagnosticReportStatus.final
-                  ) {
+                  if (reportForCode?.status === DiagnosticReportStatus.final) {
                     return null;
                   }
                   return (

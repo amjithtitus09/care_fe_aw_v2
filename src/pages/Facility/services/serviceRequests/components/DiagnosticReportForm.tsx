@@ -138,7 +138,9 @@ export function DiagnosticReportForm({
 
   // When scoped to a specific report code, only consider reports for that code
   const scopedReports = reportCode
-    ? diagnosticReports.filter((report) => report.code?.code === reportCode.code)
+    ? diagnosticReports.filter(
+        (report) => report.code?.code === reportCode.code,
+      )
     : diagnosticReports;
 
   // Get the latest report if any exists
