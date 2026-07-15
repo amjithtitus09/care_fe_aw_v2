@@ -89,6 +89,7 @@ interface DiagnosticReportFormProps {
   };
   specimens: SpecimenRead[];
   disableEdit: boolean;
+  reportCode?: Code;
 }
 
 // Interface for component values
@@ -121,6 +122,7 @@ export function DiagnosticReportForm({
   activityDefinition,
   specimens,
   disableEdit,
+  reportCode,
 }: DiagnosticReportFormProps) {
   const { t } = useTranslation();
   const [observations, setObservations] = useState<ObservationsByDefinition>(
@@ -128,7 +130,7 @@ export function DiagnosticReportForm({
   );
   const [isExpanded, setIsExpanded] = useState(true);
   const [selectedReportCode, setSelectedReportCode] = useState<Code | null>(
-    null,
+    reportCode ?? null,
   );
   const [openUploadDialog, setOpenUploadDialog] = useState(false);
   const [conclusion, setConclusion] = useState<string>("");
@@ -841,6 +843,7 @@ export function DiagnosticReportForm({
                     <NotepadText className="size-6 text-gray-950 font-normal text-base stroke-[1.5px]" />{" "}
                     <span className="text-base/9 text-gray-950 font-medium">
                       {t("test_results_entry")}
+                      {reportCode?.display ? ` — ${reportCode.display}` : ""}
                     </span>
                   </p>
                 </CardTitle>
@@ -1239,7 +1242,15 @@ export function DiagnosticReportForm({
                   </p>
                 </div>
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 justify-center">
-                  {activityDefinition?.diagnostic_report_codes &&
+                  {reportCode && (
+                    <div className="flex-1 min-w-0 flex items-center justify-center">
+                      <span className="text-sm font-medium text-gray-700 truncate">
+                        {reportCode.display} ({reportCode.code})
+                      </span>
+                    </div>
+                  )}
+                  {!reportCode &&
+                    activityDefinition?.diagnostic_report_codes &&
                     activityDefinition.diagnostic_report_codes.length > 0 && (
                       <div className="flex-1 min-w-0">
                         <Select

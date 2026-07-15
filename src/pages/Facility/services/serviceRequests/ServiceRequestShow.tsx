@@ -596,31 +596,76 @@ export default function ServiceRequestShow({
                 </DropdownMenu>
               </div>
             )}
-            {(!diagnosticReports.length ||
-              diagnosticReports[0]?.status !==
-                DiagnosticReportStatus.final) && (
-              <DiagnosticReportForm
-                patientId={request.encounter.patient.id}
-                facilityId={facilityId}
-                serviceRequestId={serviceRequestId}
-                observationDefinitions={observationRequirements}
-                diagnosticReports={diagnosticReports}
-                activityDefinition={activityDefinition}
-                specimens={request.specimens || []}
-                disableEdit={disableEdit}
-              />
-            )}
-          </div>
+            {(() => {
+              const reportCodes =
+                activityDefinition?.diagnostic_report_codes ?? [];
 
-          {diagnosticReports.length > 0 && (
-            <DiagnosticReportReview
-              facilityId={facilityId}
-              patientId={request.encounter.patient.id}
-              serviceRequestId={serviceRequestId}
-              diagnosticReports={diagnosticReports}
-              disableEdit={disableEdit}
-            />
-          )}
+              if (reportCodes.length > 0) {
+                return reportCodes.map((code) => {
+                  const codeReports = diagnosticReports.filter(
+                    (report) => report.code?.code === code.code,
+                  );
+                  const isFinalForCode =
+                    codeReports[0]?.status === DiagnosticReportStatus.final;
+
+                  return (
+                    <div key={code.code} className="space-y-3">
+                      {!isFinalForCode && (
+                        <DiagnosticReportForm
+                          patientId={request.encounter.patient.id}
+                          facilityId={facilityId}
+                          serviceRequestId={serviceRequestId}
+                          observationDefinitions={observationRequirements}
+                          diagnosticReports={codeReports}
+                          activityDefinition={activityDefinition}
+                          specimens={request.specimens || []}
+                          disableEdit={disableEdit}
+                          reportCode={code}
+                        />
+                      )}
+                      {codeReports.length > 0 && (
+                        <DiagnosticReportReview
+                          facilityId={facilityId}
+                          patientId={request.encounter.patient.id}
+                          serviceRequestId={serviceRequestId}
+                          diagnosticReports={codeReports}
+                          disableEdit={disableEdit}
+                        />
+                      )}
+                    </div>
+                  );
+                });
+              }
+
+              return (
+                <>
+                  {(!diagnosticReports.length ||
+                    diagnosticReports[0]?.status !==
+                      DiagnosticReportStatus.final) && (
+                    <DiagnosticReportForm
+                      patientId={request.encounter.patient.id}
+                      facilityId={facilityId}
+                      serviceRequestId={serviceRequestId}
+                      observationDefinitions={observationRequirements}
+                      diagnosticReports={diagnosticReports}
+                      activityDefinition={activityDefinition}
+                      specimens={request.specimens || []}
+                      disableEdit={disableEdit}
+                    />
+                  )}
+                  {diagnosticReports.length > 0 && (
+                    <DiagnosticReportReview
+                      facilityId={facilityId}
+                      patientId={request.encounter.patient.id}
+                      serviceRequestId={serviceRequestId}
+                      diagnosticReports={diagnosticReports}
+                      disableEdit={disableEdit}
+                    />
+                  )}
+                </>
+              );
+            })()}
+          </div>
         </div>
       </div>
       {!isMobile && (
