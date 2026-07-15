@@ -33,11 +33,15 @@ use it to call the Copilot API (`api.githubcopilot.com`); it is *not* exposed to
 - **Access required:** the PAT's account must have an **active GitHub Copilot subscription/seat**
   (Individual/Pro, Business, or Enterprise). That entitlement is the access being consumed. On a
   personal repo, use a Copilot-licensed personal account (e.g. `amjithtitus09`).
-- **Create it** at <https://github.com/settings/personal-access-tokens/new>:
-  - **Resource owner:** the Copilot-licensed account.
-  - **Repository access:** *Public repositories (read-only)* is sufficient — Copilot access is
-    account-based, not repo-based, so no repo write/select is needed.
-  - **Permissions:** none beyond the default **Metadata: read**.
+- **Create it** — use this pre-filled link (it sets the required Copilot permission):
+  <https://github.com/settings/personal-access-tokens/new?name=COPILOT_GITHUB_TOKEN&description=gh-aw+Copilot+engine&user_copilot_requests=read>
+  - **Resource owner:** the Copilot-licensed **personal account** (e.g. `amjithtitus09`) — **not an
+    organization** (an org-owned token gets a 401 "Resource not accessible by personal access token").
+  - **Permissions → Account permissions → Copilot Requests: Read** — this is the permission that
+    actually authorizes model inference. Without it the run fails at `activation` with
+    *HTTP 401 / "Authentication failed with provider"*.
+  - **Repository access:** minimal (*Public repositories*) is fine — Copilot access is an *account*
+    permission, not a repo one.
   - Generate, copy the `github_pat_...` value, and paste it into the `COPILOT_GITHUB_TOKEN` secret.
 - **Alternative:** if this repo lived under an org with **centralized Copilot billing**, you could
   drop this secret and set `permissions.copilot-requests: write` instead. That is not available for
