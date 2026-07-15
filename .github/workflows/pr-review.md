@@ -85,9 +85,12 @@ steps:
       set -uo pipefail
       mkdir -p /tmp/gh-aw/agent
       # enroll.yml only advances a PR to state:review once CI has COMPLETED, so this reads a
-      # final pass/fail — it does not wait. Exclude our own agentic stage checks from the gate
-      # (they are not "CI" and must never gate themselves).
-      raw="$(gh pr checks "$PR" --repo "$REPO" --json name,state,link 2>/dev/null || echo '[]')"
+      # final pass/fail — it does not wait. We gate ONLY on the deterministic code-quality CI
+      # (the same GATING_CI set enroll waits on) via a positive allowlist on the check's
+      # `workflow`. This deliberately ignores non-code infra checks — label bots (`assign-pr` /
+      # Assign Labels), deploys, code scanning, and our own agentic stages — so an unrelated
+      # infra failure can never force an endless review→rework loop.
+      raw="$(gh pr checks "$PR" --repo "$REPO" --json name,state,link,workflow 2>/dev/null || echo '[]')"
       printf '%s' "$raw" > /tmp/gh-aw/agent/ci-raw.json
       python3 - <<'PY'
       import json, re
@@ -96,9 +99,11 @@ steps:
           checks = json.loads(raw)
       except Exception:
           checks = []
-      # Names of the agentic pipeline's own workflows — never gate on ourselves.
-      SELF = re.compile(r"(state:|Visual QA|PR Review|PR Rework|Jira .*Author|enroll|ledger|watchdog)", re.I)
-      checks = [c for c in checks if not SELF.search(c.get("name", ""))]
+      # Positive allowlist: only these deterministic CI workflows gate the pipeline. "Lint Code
+      # Base" runs both eslint and knip, so a knip failure surfaces here. Keep in sync with
+      # enroll.yml's GATING_CI.
+      GATING = re.compile(r"(Lint Code Base|Unit Tests|Build PR Preview|Playwright Tests)", re.I)
+      checks = [c for c in checks if GATING.search((c.get("workflow") or "") + " " + (c.get("name") or ""))]
       bad_states = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
       pend_states = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
       failed = [c for c in checks if str(c.get("state", "")).upper() in bad_states]
@@ -115,13 +120,13 @@ steps:
           f.write(status + "\n")
       with open("/tmp/gh-aw/agent/ci-details.txt", "w") as f:
           if failed:
-              f.write("Failed required checks:\n")
+              f.write("Failed deterministic CI checks:\n")
               for c in failed:
-                  f.write(f"- {c.get('name','?')} ({c.get('state','?')}) {c.get('link','')}\n")
+                  f.write(f"- {c.get('name','?')} [{c.get('workflow','?')}] ({c.get('state','?')}) {c.get('link','')}\n")
           else:
-              f.write("No failed checks.\n")
+              f.write("No failed gating CI checks.\n")
       print(f"CI status for PR #{__import__('os').environ.get('PR')}: {status} "
-            f"({len(failed)} failed, {len(pending)} pending, {len(checks)} total)")
+            f"({len(failed)} failed, {len(pending)} pending, {len(checks)} gating)")
       PY
 ---
 
