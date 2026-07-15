@@ -322,8 +322,23 @@ export default function ServiceRequestShow({
     }
   };
 
+  const diagnosticReportCodes =
+    request?.activity_definition?.diagnostic_report_codes ?? [];
+
+  // When the activity definition defines one or more diagnostic report codes,
+  // the request is considered final only when every code has a final report.
+  // Otherwise fall back to the single-report behaviour.
   const isFinal =
-    request?.diagnostic_reports?.[0]?.status === DiagnosticReportStatus.final;
+    diagnosticReportCodes.length > 0
+      ? diagnosticReportCodes.every((code) =>
+          diagnosticReports.some(
+            (report) =>
+              report.code?.code === code.code &&
+              report.status === DiagnosticReportStatus.final,
+          ),
+        )
+      : request?.diagnostic_reports?.[0]?.status ===
+        DiagnosticReportStatus.final;
 
   const canMarkAsComplete =
     isFinal ||
@@ -596,20 +611,45 @@ export default function ServiceRequestShow({
                 </DropdownMenu>
               </div>
             )}
-            {(!diagnosticReports.length ||
-              diagnosticReports[0]?.status !==
-                DiagnosticReportStatus.final) && (
-              <DiagnosticReportForm
-                patientId={request.encounter.patient.id}
-                facilityId={facilityId}
-                serviceRequestId={serviceRequestId}
-                observationDefinitions={observationRequirements}
-                diagnosticReports={diagnosticReports}
-                activityDefinition={activityDefinition}
-                specimens={request.specimens || []}
-                disableEdit={disableEdit}
-              />
-            )}
+            {diagnosticReportCodes.length > 0
+              ? diagnosticReportCodes.map((code) => {
+                  const reportForCode = diagnosticReports.find(
+                    (report) => report.code?.code === code.code,
+                  );
+                  if (
+                    reportForCode?.status === DiagnosticReportStatus.final
+                  ) {
+                    return null;
+                  }
+                  return (
+                    <DiagnosticReportForm
+                      key={code.code}
+                      patientId={request.encounter.patient.id}
+                      facilityId={facilityId}
+                      serviceRequestId={serviceRequestId}
+                      observationDefinitions={observationRequirements}
+                      diagnosticReports={diagnosticReports}
+                      activityDefinition={activityDefinition}
+                      specimens={request.specimens || []}
+                      disableEdit={disableEdit}
+                      reportCode={code}
+                    />
+                  );
+                })
+              : (!diagnosticReports.length ||
+                  diagnosticReports[0]?.status !==
+                    DiagnosticReportStatus.final) && (
+                  <DiagnosticReportForm
+                    patientId={request.encounter.patient.id}
+                    facilityId={facilityId}
+                    serviceRequestId={serviceRequestId}
+                    observationDefinitions={observationRequirements}
+                    diagnosticReports={diagnosticReports}
+                    activityDefinition={activityDefinition}
+                    specimens={request.specimens || []}
+                    disableEdit={disableEdit}
+                  />
+                )}
           </div>
 
           {diagnosticReports.length > 0 && (
