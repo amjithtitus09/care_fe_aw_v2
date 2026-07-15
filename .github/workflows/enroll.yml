@@ -2,63 +2,65 @@ name: Pipeline — Enroll
 
 # Entry point of the linear Jira -> mergeable-PR pipeline (see docs/PIPELINE.md).
 #
-# This is intentionally a plain, deterministic GitHub Actions workflow rather than an agentic
-# gh-aw workflow: enrolling a PR is a conditional label write.
+# Plain, deterministic (non-agentic): enrolling a PR is a conditional label write.
 #
-# What it does: when a PR carries `jira-agent`, has NO `state:*` label yet, and its head commit's
-# deterministic CI has COMPLETED (green OR red — we do not require green, because the review stage
-# folds CI in and routes a red PR to rework), add `state:review` to start the pipeline.
+# When a PR carries `jira-agent`, has NO `state:*` label yet, and its head commit's deterministic
+# CI has COMPLETED (green OR red — we do not require green; the review stage folds CI in and routes
+# a red PR to rework), add `state:review` to start the pipeline.
 #
 # Why wait for CI to complete: the review stage judges code AND CI together, so it should see a
-# final CI verdict rather than a pending one. We wait via the check_suite completed event (which is
-# workflow-name-agnostic), re-evaluating each time a suite finishes until none are pending.
+# final CI verdict rather than a pending one.
 #
-# Triggers:
-#   * pull_request_target (opened/reopened/ready_for_review/labeled) — the PR just appeared or was
-#     labelled `jira-agent`; enrol if CI has already finished, else wait for check_suite.
-#   * check_suite (completed) — a CI suite finished; re-evaluate and enrol once nothing is pending.
+# Why `workflow_run` (NOT `check_suite`): GitHub deliberately does NOT dispatch `check_suite` /
+# `check_run` events for suites created by GitHub Actions (recursion prevention), so a
+# check_suite-triggered enroll never re-fires after CI finishes and the PR stalls at `jira-agent`.
+# `workflow_run` DOES fire when a named workflow completes. The set of workflows we trigger on is
+# exactly the set we gate on (GATING_CI), so there is no "which check was last" race.
 
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review, labeled]
-  check_suite:
+  workflow_run:
+    # Deterministic CI whose completion means "code CI is done". Keep in sync with GATING_CI below.
+    workflows: ["Lint Code Base", "Unit Tests", "Build PR Preview", "Playwright Tests"]
     types: [completed]
 
 permissions:
   pull-requests: write
   issues: write
   checks: read
+  actions: read
 
 concurrency:
-  group: pipeline-enroll-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.run_id }}
+  group: pipeline-enroll-${{ github.event.pull_request.number || github.event.workflow_run.head_sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   enroll:
     runs-on: ubuntu-latest
-    # For label events, only act when the label just added was `jira-agent` (or on open/reopen of a
-    # PR that already carries it). check_suite events are filtered in-script (the PR is located from
-    # the head SHA first).
+    # Label events: act only when the added label is `jira-agent` (or open/reopen of a PR that
+    # already carries it). workflow_run events are filtered in-script (PR located from head SHA).
     if: >-
-      github.event_name == 'check_suite' ||
+      github.event_name == 'workflow_run' ||
       (contains(github.event.pull_request.labels.*.name, 'jira-agent') &&
        (github.event.action != 'labeled' || github.event.label.name == 'jira-agent'))
     steps:
       - name: Enroll when eligible and CI has completed
         env:
-          # The PAT makes the `state:review` label event cascade past GitHub's recursion guard to
-          # trigger pr-review (a label added with the default GITHUB_TOKEN is suppressed and would
-          # never fire the review listener). Falls back to GITHUB_TOKEN (pipeline won't cascade).
+          # PAT so the `state:review` label event cascades past the recursion guard to trigger
+          # pr-review. Falls back to GITHUB_TOKEN (label set, but the review stage won't fire).
           GH_TOKEN: ${{ secrets.GH_AW_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.check_suite.head_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Deterministic CI workflows we wait on — MUST match the workflow_run trigger list above.
+          GATING_CI: 'Lint Code Base|Unit Tests|Build PR Preview|Playwright Tests'
         run: |
           set -euo pipefail
 
           # Resolve the PR under evaluation.
-          if [ "$EVENT" = "check_suite" ]; then
+          if [ "$EVENT" = "workflow_run" ]; then
             PR_NUMBER="$(gh pr list --repo "$REPO" --state open \
               --search "$HEAD_SHA" --json number --jq '.[0].number' || true)"
             if [ -z "${PR_NUMBER:-}" ] || [ "$PR_NUMBER" = "null" ]; then
@@ -77,19 +79,18 @@ jobs:
             echo "PR #$PR_NUMBER already in a state:* stage — nothing to enrol."; exit 0
           fi
 
-          # Wait for deterministic CI to COMPLETE (green or red). Pending checks -> wait (the
-          # check_suite completed trigger re-evaluates when they finish). Exclude our own agentic
-          # pipeline checks so they never gate enrolment.
-          checks="$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json state,name 2>/dev/null || echo '[]')"
-          checks="$(printf '%s' "$checks" | jq '[.[] | select(.name | test("state:|Visual QA|PR Review|PR Rework|Jira .*Author|Enroll|Ledger|Watchdog"; "i") | not)]')"
-          total="$(printf '%s' "$checks" | jq 'length')"
-          pending="$(printf '%s' "$checks" | jq '[.[] | select(.state=="PENDING" or .state=="QUEUED" or .state=="IN_PROGRESS")] | length')"
+          # Gate ONLY on the deterministic CI workflows (green or red). Ignore our own agentic
+          # checks and everything else (scanning, deploys, label bots).
+          checks="$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json state,name,workflow 2>/dev/null || echo '[]')"
+          ci="$(printf '%s' "$checks" | jq --arg g "$GATING_CI" '[.[] | select((.workflow // "") | test($g))]')"
+          total="$(printf '%s' "$ci" | jq 'length')"
+          pending="$(printf '%s' "$ci" | jq '[.[] | select(.state=="PENDING" or .state=="QUEUED" or .state=="IN_PROGRESS")] | length')"
           if [ "$total" -eq 0 ]; then
-            echo "PR #$PR_NUMBER has no checks yet — waiting for CI to appear."; exit 0
+            echo "PR #$PR_NUMBER has no gating CI checks yet — waiting for CI to appear."; exit 0
           fi
           if [ "$pending" -gt 0 ]; then
-            echo "PR #$PR_NUMBER has $pending pending checks — will re-evaluate when CI completes."; exit 0
+            echo "PR #$PR_NUMBER has $pending pending gating CI checks — will re-evaluate when CI completes."; exit 0
           fi
 
-          echo "Enrolling PR #$PR_NUMBER into the pipeline (state:review)."
+          echo "Gating CI complete on PR #$PR_NUMBER — enrolling into the pipeline (state:review)."
           gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'state:review'

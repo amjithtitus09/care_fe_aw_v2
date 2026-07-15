@@ -13,13 +13,39 @@ Workflows only trigger from the repo's **default branch** (`repository_dispatch`
 
 | Secret | Required | What it is |
 |--------|----------|------------|
-| `COPILOT_GITHUB_TOKEN` | **Yes** | The model-engine token gh-aw uses to call Copilot. Without it, no agentic stage runs. (On a personal-account repo there is no org centralized Copilot billing, so this secret is the auth path rather than `permissions.copilot-requests`.) |
+| `COPILOT_GITHUB_TOKEN` | **Yes** | The model-engine token gh-aw uses to call Copilot. Must be a **fine-grained PAT** (`github_pat_...`) from a Copilot-licensed account — OAuth/classic tokens are rejected. Without it, no agentic stage runs. See the detailed note below. |
 | `GH_AW_AGENT_TOKEN` | **Yes** | A fine-grained **PAT** that makes every `state:*` label write cascade past GitHub's recursion guard to the next stage, and attributes writes to a write-access user. Also reusable as the Jira→GitHub dispatch token (step 4). |
 | `JIRA_BASE_URL` | Optional | e.g. `https://your-org.atlassian.net` — for status reports on the linked issue. |
 | `JIRA_EMAIL` | Optional | The Jira account email for the API token. |
 | `JIRA_API_TOKEN` | Optional | A Jira API token. |
 
 Without the `JIRA_*` trio the pipeline still runs end to end — it just skips the Jira comments.
+
+### `COPILOT_GITHUB_TOKEN` — what it is and how to create it
+
+This is the **model-inference** token (separate from the repo-write PAT below). The agentic stages
+use it to call the Copilot API (`api.githubcopilot.com`); it is *not* exposed to the model and does
+*not* need repo write.
+
+- **Must be a fine-grained PAT** (`github_pat_...`). The Copilot engine **rejects OAuth tokens**
+  (`gho_...`, e.g. from `gh auth token`) and classic tokens — the activation step fails with
+  *"OAuth tokens are not supported for GitHub Copilot"* if you use one.
+- **Access required:** the PAT's account must have an **active GitHub Copilot subscription/seat**
+  (Individual/Pro, Business, or Enterprise). That entitlement is the access being consumed. On a
+  personal repo, use a Copilot-licensed personal account (e.g. `amjithtitus09`).
+- **Create it** — use this pre-filled link (it sets the required Copilot permission):
+  <https://github.com/settings/personal-access-tokens/new?name=COPILOT_GITHUB_TOKEN&description=gh-aw+Copilot+engine&user_copilot_requests=read>
+  - **Resource owner:** the Copilot-licensed **personal account** (e.g. `amjithtitus09`) — **not an
+    organization** (an org-owned token gets a 401 "Resource not accessible by personal access token").
+  - **Permissions → Account permissions → Copilot Requests: Read** — this is the permission that
+    actually authorizes model inference. Without it the run fails at `activation` with
+    *HTTP 401 / "Authentication failed with provider"*.
+  - **Repository access:** minimal (*Public repositories*) is fine — Copilot access is an *account*
+    permission, not a repo one.
+  - Generate, copy the `github_pat_...` value, and paste it into the `COPILOT_GITHUB_TOKEN` secret.
+- **Alternative:** if this repo lived under an org with **centralized Copilot billing**, you could
+  drop this secret and set `permissions.copilot-requests: write` instead. That is not available for
+  a personal-account repo, so use the fine-grained PAT here.
 
 ### `GH_AW_AGENT_TOKEN` PAT scopes
 
