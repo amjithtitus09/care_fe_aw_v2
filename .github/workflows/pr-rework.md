@@ -3,7 +3,7 @@ description: >
   Autonomous rework fixer for care_fe — the `state:rework` stage of the linear pipeline (see
   docs/PIPELINE.md). Fires when either the review stage or the QA stage marks a PR `state:rework`.
   It reads the most recent blocking findings (a review summary comment or QA's evidence comment),
-  checks out the PR branch, implements a minimal fix, validates with the repo's lint-fix/build/tsc,
+  checks out the PR branch, implements a minimal fix, validates with the repo's lint-fix/knip/build/tsc,
   and pushes the fix to the PR branch with a `[skip-ci]` commit. It then re-labels the PR
   `state:review` to send it back through review and QA. A hard rework cap (max 3 automated attempts
   per PR) is enforced; when the cap is exhausted it escalates to `state:human` and stops. Reports
@@ -51,6 +51,7 @@ tools:
     - "npm run lint*"
     - "npm run lint-fix*"
     - "npm run format*"
+    - "npm run knip*"
     - "npm run build*"
     - "npx tsc*"
     - "git *"
@@ -73,6 +74,9 @@ safe-outputs:
       - "src/**"
       - "public/locale/en.json"
       - "tests/**"
+      # knip runs inside the "Lint Code Base" CI job; fixing a knip failure sometimes needs an
+      # ignore in knip.json (e.g. a legitimately-unused-for-now export), so allow that config file.
+      - "knip.json"
     commit-title-suffix: " [skip-ci]"
   add-comment:
     max: 2
@@ -154,9 +158,15 @@ npm ci --prefer-offline
 ## Step 3 — Implement a minimal fix
 
 Edit only the files needed to resolve the reported defect, under `src/**`, `public/locale/en.json`,
-or `tests/**`. Keep the change surgical and consistent with the surrounding code and repo
-conventions. Do not refactor unrelated code, and do not change tests to mask the defect. For a
+`tests/**`, or `knip.json`. Keep the change surgical and consistent with the surrounding code and
+repo conventions. Do not refactor unrelated code, and do not change tests to mask the defect. For a
 missing i18n key, append it to the end of `public/locale/en.json`.
+
+**knip failures** (reported as the `lint` / "Lint Code Base" check): the CI lint job runs both
+eslint and `knip` (unused files/exports/dependencies). If knip is the failure, fix it at the source
+first — remove the genuinely-unused export/file/dep the PR introduced. Only when the flagged item is
+intentionally kept (e.g. a public API surface used elsewhere later) add a **minimal, specific**
+ignore entry to `knip.json`. Never blanket-ignore to silence unrelated pre-existing findings.
 
 ## Step 4 — Validate locally
 
@@ -164,10 +174,12 @@ Run the repo's checks and make sure they pass before pushing:
 
 ```bash
 npm run lint-fix
+npm run knip
 npm run build
 ```
 
-Run `npx tsc --noEmit` if the defect was type-related. If a fix introduces new problems you cannot
+`npm run knip` must be clean (it is part of the "Lint Code Base" CI check alongside eslint). Run
+`npx tsc --noEmit` if the defect was type-related. If a fix introduces new problems you cannot
 resolve cleanly, prefer escalation (`state:human`) over a hacky workaround.
 
 ## Step 5 — Push, re-label, and report
