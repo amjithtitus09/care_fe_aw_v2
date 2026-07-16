@@ -295,6 +295,71 @@ steps:
         echo "::warning::playwright browser install failed; agent will use the playwright-cli fallback"
       fi
 
+  - name: Provision the QA harness (auth storageState + Playwright config) for the agent
+    continue-on-error: true
+    run: |
+      set -uo pipefail
+      # Deterministically hand the agent a WORKING auth state and a WORKING Playwright config, so it
+      # never has to run care_fe's setup project (whose webServer/globalSetup clash with the running
+      # preview) or hand-roll auth. The agent then ONLY writes its focused feature spec and runs it.
+      mkdir -p tests/uiqa tests/.auth /tmp/gh-aw/agent
+      # 1. Fresh-auth globalSetup: the runner mints a token at boot, but the agent runs its spec
+      #    ~15+ min later by which point care's short-lived access JWT has EXPIRED — so a
+      #    pre-baked token in storageState makes the app redirect to login. Instead, write a
+      #    Playwright globalSetup that logs in via the API AT SPEC-RUN TIME and writes a fresh
+      #    storageState. This runs inside the agent sandbox against the sandbox origin.
+      cat > tests/uiqa/qa.globalsetup.ts <<'EOF'
+      import { request } from '@playwright/test';
+      import * as fs from 'fs';
+      export default async function globalSetup() {
+        const ctx = await request.newContext({ baseURL: 'http://host.docker.internal' });
+        const res = await ctx.post('/api/v1/auth/login/', {
+          data: { username: 'admin', password: 'admin' },
+        });
+        if (!res.ok()) throw new Error(`QA login failed: HTTP ${res.status()}`);
+        const { access, refresh } = await res.json();
+        const state = { cookies: [], origins: [{
+          origin: 'http://host.docker.internal',
+          localStorage: [
+            { name: 'care_access_token', value: access },
+            { name: 'care_refresh_token', value: refresh },
+          ],
+        }]};
+        fs.mkdirSync('tests/.auth', { recursive: true });
+        fs.writeFileSync('tests/.auth/user.json', JSON.stringify(state));
+        await ctx.dispose();
+      }
+      EOF
+      # Also seed an initial (possibly-stale) storageState so the file always exists; globalSetup
+      # overwrites it with fresh tokens at run time.
+      if [ -f /tmp/gh-aw/agent/auth.json ]; then
+        ACCESS="$(jq -r '.access // ""' /tmp/gh-aw/agent/auth.json)"
+        REFRESH="$(jq -r '.refresh // ""' /tmp/gh-aw/agent/auth.json)"
+        jq -n --arg a "$ACCESS" --arg r "$REFRESH" \
+          '{cookies: [], origins: [{origin: "http://host.docker.internal", localStorage: [{name: "care_access_token", value: $a}, {name: "care_refresh_token", value: $r}]}]}' \
+          > tests/.auth/user.json
+      fi
+      # 2. Self-contained Playwright config: baseURL = sandbox origin; NO webServer, NO globalSetup,
+      #    NO setup project (those are the repo default's, and they break here). desktop + mobile
+      #    projects reuse the storageState above. The agent runs its spec with:
+      #      CI=true npx playwright test --config tests/uiqa/qa.config.ts --project desktop --project mobile
+      cat > tests/uiqa/qa.config.ts <<'EOF'
+      import { defineConfig, devices } from '@playwright/test';
+      export default defineConfig({
+        testDir: '.', fullyParallel: false, retries: 0,
+        globalSetup: './qa.globalsetup.ts',
+        reporter: [['json', { outputFile: '/tmp/gh-aw/agent/qa-results.json' }], ['list']],
+        outputDir: '/tmp/gh-aw/agent/qa-artifacts',
+        use: { baseURL: 'http://host.docker.internal', trace: 'off', storageState: 'tests/.auth/user.json' },
+        projects: [
+          { name: 'desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1366, height: 768 } } },
+          { name: 'mobile',  use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
+        ],
+      });
+      EOF
+      echo "provisioned tests/uiqa/qa.config.ts + qa.globalsetup.ts"
+      ls -la tests/.auth/user.json tests/uiqa/qa.config.ts tests/uiqa/qa.globalsetup.ts 2>&1 || true
+
 # Always tear the seeded backend down, even if the agent or build failed, so a crashed run
 # never leaves Docker services holding the runner.
 post-steps:
@@ -359,18 +424,19 @@ Your three possible outcomes (pick exactly one, see Step 7):
   a PR build failure), and you have a screenshot and concrete findings the fixer can act on.
 - **`state:human`** — verification was impossible for a reason that is **not the PR's
   fault**: an **infrastructure** failure (backend never came up, preview server unreachable,
-  the sandbox browser cannot reach the runner), or the **exact data state the PR changes could
-  not be seeded** through care's fixture API (Step 3). You escalate with an
-  actionable report instead of blaming the PR — or passing it on adjacent evidence.
+  the sandbox browser cannot reach the runner), or the required data state **could not be built even
+  after you tried** to construct it via care_fe's flows and the fixture bridge (Step 3d). You escalate
+  with an actionable report of what you *tried to build* — never merely because the data was absent
+  (that is a prerequisite to create in Step 3d), and never by passing on adjacent evidence.
 
 ## What you can and cannot run
 
-You **can** run `npx playwright test` (chromium + `@playwright/test` are pre-installed in
-`node_modules` on the runner) — that is how you drive care_fe's harness and your focused spec. You
-**cannot** run `npm ci` / `npm run build` and do not need to: the PR is already built and served.
-Never run `npm ci`/`npm run build`. You write specs and configs under `tests/uiqa/` (and may let
-care_fe's setup project write `tests/.auth/`); do **not** modify `src/**` or care_fe's existing
-`tests/**` specs.
+You **can** run `npx playwright test --config tests/uiqa/qa.config.ts` (chromium + `@playwright/test`
+are pre-installed in `node_modules`) — that is how you run your focused spec. You **cannot** run
+`npm ci` / `npm run build` and do not need to: the PR is already built and served. Never run
+`npm ci`/`npm run build`, and never run a bare `npx playwright test` without `--config` (it picks up
+the repo default config and breaks — see Step 4A). You write specs and configs under `tests/uiqa/`;
+do **not** modify `src/**` or care_fe's existing `tests/**` specs.
 
 **Prefer `npx playwright test` (the harness) over the interactive `playwright-cli`** for both seeding
 and capture — it reuses care_fe's real flows, asserts mechanically, and produces both viewports.
@@ -414,12 +480,14 @@ The fixture credentials below are throwaway test accounts on an ephemeral runner
   expected to be running (the same baseline care_fe's own CI relies on). Whether it actually came up
   is recorded in `/tmp/gh-aw/agent/backend-status.txt` (`up` or `down`) — always read it first.
   Anything feature-specific beyond the baseline, you create through real product flows in Step 3.
-- **Fixture login**: username `admin`, password `admin` (a superuser). You authenticate by running
-  care_fe's `auth.setup.ts` (Step 2), which logs in through the UI and saves `tests/.auth/user.json`;
-  your focused spec reuses that `storageState`, so it is already signed in.
-- **Seed bridge (fallback only)**: `POST http://host.docker.internal/__qa_seed` with a Python
+- **Fixture login**: username `admin`, password `admin` (a superuser). The runner pre-minted a token
+  and published it at `/tmp/gh-aw/agent/auth.json` (`{ "access": ..., "refresh": ... }`). You
+  authenticate by injecting those into `localStorage` in your spec's `beforeEach` (Step 2/4) — do
+  **not** run care_fe's `auth.setup`/`setup` project (its `webServer`/`globalSetup` clash with the
+  running preview and fail on this origin).
+- **Seed bridge (prerequisite builder)**: `POST http://host.docker.internal/__qa_seed` with a Python
   `CareFixtureBase` script runs it inside the backend container and returns `QA-SEED-EXIT: <n>`
-  (`0` = success). Use it ONLY for a backend prerequisite no UI flow can create (Step 3d) — never as
+  (`0` = success). Use it to build a backend prerequisite no UI flow can create (Step 3d) — never as
   the primary seeding path, and never raw ORM.
 
 ## Step 0 — Confirm the environment, or escalate / rework
@@ -445,46 +513,48 @@ Find your own previous evidence comment on this PR (a comment containing the mar
 new comment can continue the numbering and you can tell whether a prior rework addressed the
 last defect. This is informational only — labels, not comments, are authoritative.
 
-## Step 2 — Set up care_fe's OWN test harness (auth + baseline IDs)
+## Step 2 — Your harness is pre-provisioned (auth + config). Just verify it.
 
-**Do NOT hand-roll authentication or data seeding.** care_fe ships a complete, maintained Playwright
-test harness in `tests/` — the same one care's own developers use and keep green in CI. It already
-knows how to log in and how to create every entity through the real product. You will reuse it. This
-is the key to verifying *any* feature: the knowledge of how to build each data graph lives in the
-repo you are checked out in, not in this prompt.
+**The runner has already set up authentication and the Playwright config for you.** Do NOT run
+care_fe's `setup` project, do NOT hand-roll auth, do NOT write a Playwright config — every past QA
+run that tried wasted its budget on `webServer`/`globalSetup` conflicts. Two files are ready:
 
-First, learn the harness (read, don't guess):
+- `tests/.auth/user.json` — a Playwright `storageState` with a **valid signed-in `admin` session**
+  for the sandbox origin. A `globalSetup` in the config logs in **fresh via the API at spec-run
+  time** and rewrites this file, so the session is never stale. Your spec is already logged in; you
+  do not touch tokens. (If you ever see a redirect to `/login`, do not re-implement auth — it means
+  the backend is down; escalate as infra.)
+- `tests/uiqa/qa.config.ts` — the correct config (baseURL `http://host.docker.internal`, no
+  webServer/globalSetup/setup project, `desktop` + `mobile` projects reusing that storageState).
+
+Verify they exist and the backend is up, then move on:
+
+```bash
+cat /tmp/gh-aw/agent/backend-status.txt     # must be "up"
+ls -la tests/.auth/user.json tests/uiqa/qa.config.ts
+```
+
+If `backend-status.txt` is not `up`, or those files are missing, the environment failed to come up →
+Step 7 with **`state:human`** (infrastructure, not the PR's fault). Otherwise you are authenticated
+and configured — proceed to build the feature's data (Step 3) and write ONE spec (Step 4).
+
+**Reuse care_fe's harness HELPERS and existing SPECS.** The value of `tests/` is the reusable
+interaction helpers and the flow knowledge in existing specs. Learn them:
 
 ```bash
 cat tests/PLAYWRIGHT_GUIDE.md
-ls tests/setup tests/helper tests/support
-cat tests/setup/auth.setup.ts
+ls tests/helper tests/support
 ```
 
-- `tests/setup/*.setup.ts` — care_fe's setup project: `auth.setup.ts` logs in as `admin`/`admin` and
-  saves the signed-in state to `tests/.auth/user.json`; `facility.setup.ts` / `patient.setup.ts`
-  discover baseline IDs and write `tests/.auth/facilityMeta.json`, `patientMeta.json`,
-  `encounterMeta.json`.
-- `tests/support/facilityId.ts` (`getFacilityId()`), `tests/helper/ui.ts`
-  (`selectFromCommand`, `selectFromValueSet`, `selectFromRequirements`,
-  `clickTabOrMenuItem(page, /service requests/i)`, `expectToast`, …) — reusable helpers that
-  encode the real interaction patterns. Reuse them; never reinvent selectors.
+- `tests/helper/ui.ts` — `selectFromCommand`, `selectFromValueSet`, `selectFromRequirements`,
+  `clickTabOrMenuItem(page, /service requests/i)`, `expectToast`, … Reusable, origin-agnostic
+  helpers that encode the real interaction patterns. Reuse them; never reinvent selectors.
+- Existing feature specs under `tests/**` (Step 3b) show the exact create flow for each entity.
 
-Run care_fe's **setup project** against the already-served app to authenticate and capture the
-baseline IDs, using the QA config you will create in Step 4 (it points the harness at the sandbox
-origin — the only one you can reach — instead of the repo default `localhost:4000`):
-
-```bash
-CI=true npx playwright test --config tests/uiqa/qa.config.ts --project setup --workers 1 > /tmp/gh-aw/agent/qa-setup.log 2>&1 || true
-cat tests/.auth/user.json >/dev/null 2>&1 && echo "auth captured" || tail -30 /tmp/gh-aw/agent/qa-setup.log
-```
-
-(Write `tests/uiqa/qa.config.ts` from Step 4 FIRST, then run this.) If `auth.setup` succeeds you now
-have a real signed-in `storageState` for the sandbox origin plus the baseline ID files — every
-care_fe helper and setup dependency will work in your focused spec.
-
-If the setup project cannot authenticate at all (not just a missing optional ID), the app or backend
-is broken at the environment level → go to Step 7 with **`state:human`** (do not blame the PR).
+Reach a facility/patient/encounter by **navigating the baseline UI** — the baseline fixtures include
+a facility named "Facility with Patient" with patients and encounters, exactly what a user clicks
+through. (Do not rely on `getFacilityId()`/`*Meta.json` — those come from the setup project you are
+not running.)
 
 ## Step 3 — Reach and seed the EXACT changed surface by reusing care_fe's flows
 
@@ -519,36 +589,80 @@ form steps, valueset pickers, toasts) for that entity — proven and current. Th
 In the focused spec you write in Step 4, **create the PR-specific data by reusing those helpers and
 flow steps** — navigate the create pages, fill the forms with the care_fe helpers, submit, and
 assert the success toast — exactly as `ServiceRequestCreate.spec.ts` (or the analogue for your
-feature) does. Reuse `getFacilityId()` / the `tests/.auth/*Meta.json` IDs from Step 2 as the parents.
-Build the graph top-down (facility -> patient -> encounter -> the feature entity), reusing an
-existing baseline record wherever the setup project already discovered one.
+feature) does. Reach the parent records by **navigating the baseline UI** (open the "Facility with
+Patient" fixture, pick a patient/encounter) rather than `getFacilityId()`/meta files. Build the graph
+top-down (facility -> patient -> encounter -> the feature entity), reusing an existing baseline
+record wherever one already exists.
 
 This is dynamic and general: any state the product can reach, you reach the same way the product's
 own tests do — no per-feature recipe baked into this workflow.
 
-### 3d. Prerequisite fallback (only if no UI flow can create it)
+> **Create the feature's entities THROUGH THE UI, never through the seed bridge.** The ServiceRequest,
+> the DiagnosticReports, etc. are created by driving their real create pages in your spec (3c). Do
+> **not** try to create them with `manage.py`/ORM via `/__qa_seed` — there is no fixture method for
+> every entity, raw ORM hits `IntegrityError`/missing-field errors (it has repeatedly burned entire
+> QA runs), and creating via the UI is the whole point of QA. The seed bridge (3d) is ONLY for a
+> backend-config prerequisite that has no create flow at all.
 
-If a **backend-only prerequisite** genuinely has no UI/create flow (e.g. an admin-config record the
-app never creates itself), you may seed just that record through the validated fixture API — never
-raw ORM. Write a small script using care's `CareFixtureBase` and POST it to the seed bridge:
+### 3d. Build a named prerequisite yourself — do NOT escalate what you can name
 
-```bash
-cat care/care/fixtures/fixtures.md
-grep -n "def create_" care/care/fixtures/base.py
-curl -s -X POST http://host.docker.internal/__qa_seed --data-binary @/tmp/gh-aw/agent/qa-seed-1.py
-```
+**If you can name the exact data the feature needs, you can almost always create it — so create it,
+do not escalate.** Many features render only in a specific backend state the baseline fixtures don't
+include (e.g. ENG-503 renders multiple report forms only when the ActivityDefinition has **≥2
+`diagnostic_report_codes`**). That is a prerequisite to build, NOT a reason to hand off to a human.
 
-The script opens `care_fixture_context()` and calls `base.create_*` (validated, commits on success;
-response ends `QA-SEED-EXIT: 0`). Use this ONLY for a true prerequisite the flow can't build; the
-feature's own entities must still be created through its real UI flow (3c) so QA proves the flow
-works. Cap: at most 3 attempts, fix the script from the traceback each time, never retry it verbatim.
+Two ways to build it, in order of preference:
 
-### 3e. Un-seedable => escalate honestly (never fake it)
+1. **Through care_fe's own admin/create UI**, if the app exposes one (many config records —
+   ActivityDefinitions, HealthcareServices, etc. — are created under facility settings). Reuse the
+   matching `tests/**` spec/helper exactly as in 3b/3c.
+2. **Through the validated fixture bridge** when there is no UI flow (or it is impractically deep).
+   Write a small `CareFixtureBase` script and POST it — **only `base.create_*` / `base` helper calls,
+   NEVER raw ORM** (`Model.objects...` bypasses validation and fails with IntegrityError — it has
+   repeatedly wasted whole runs). Discover the method and its fields first:
 
-If after reusing the real flows you still cannot construct the exact state the PR changes, do **not**
-screenshot an adjacent surface and call it evidence. Go to Step 7 with **`state:human`** and an
-actionable report: `missing: <state> for <feature>; tried: <flows/specs reused + errors>; unblock:
-<the flow step or record that failed>`. That structured report is the run's deliverable.
+   ```bash
+   cat care/care/fixtures/fixtures.md
+   grep -nA20 "def create_activity_definition" care/care/fixtures/base.py   # or your entity
+   curl -s -X POST http://host.docker.internal/__qa_seed --data-binary @/tmp/gh-aw/agent/qa-seed-1.py
+   ```
+
+   Every `create_*` method forwards `**kwargs` into the request body, so feature-specific fields go
+   straight in — e.g. to satisfy ENG-503:
+
+   ```python
+   # /tmp/gh-aw/agent/qa-seed-1.py  (illustrative — read base.py for the exact required args)
+   from care.fixtures.context import care_fixture_context
+   with care_fixture_context() as base:
+       org = base.create_organization(name="QA Org")
+       facility = base.create_facility(org.id, name="QA Hospital")
+       ad = base.create_activity_definition(
+           facility.id, title="QA Multi-Code Panel", code=..., locations=[...],
+           specimen_requirements=[...], observation_result_requirements=[...],
+           charge_item_definitions=[...],
+           diagnostic_report_codes=[code_a, code_b],   # the ≥2 codes the feature needs
+       )
+       print("QA-SEED activity_definition", ad.slug)
+   ```
+
+The script opens `care_fixture_context()` (validated, commits on success; response ends
+`QA-SEED-EXIT: 0`). The feature's *own* entities should still be created through its real UI flow
+(3c) so QA proves that flow — use the bridge for the config/prerequisite records behind it. Cap: at
+most 4 attempts, fixing the script from each traceback; never resend an identical failing script.
+
+### 3e. Escalate ONLY when you cannot build it even knowing exactly what it is
+
+Escalation to `state:human` is a last resort for when the required state is genuinely unbuildable —
+NOT for a prerequisite you were able to name. Before escalating you must have actually **tried** to
+build the named prerequisite via 3d (a UI flow AND the fixture bridge) and hit a concrete blocker.
+If you can write the sentence "a human needs to create X", then X is something you should have
+created in 3d — go back and do it.
+
+If a build genuinely fails after those attempts, do **not** screenshot an adjacent surface and call
+it evidence. Go to Step 7 with **`state:human`** and an actionable report: `missing: <state> for
+<feature>; tried: <UI flow + fixture create_* calls, with the exact errors>; unblock: <the specific
+field/endpoint that rejected it>`. That structured report — proving you tried to build it, not just
+that it was absent — is the run's deliverable.
 ## Step 4 — Exercise and capture before/after screenshots (desktop AND mobile — both mandatory)
 
 You have two ways to capture evidence. **Prefer the scripted spec runner (A)** — it makes the
@@ -557,72 +671,40 @@ the coded suite. Fall back to interactive driving (B) only when the runner is un
 capture **principles** below (assert-before-shot, shoot-the-outcome, self-verify) are mandatory
 either way.
 
-### A. Primary — author and run a focused Playwright spec that REUSES care_fe's harness
-The pre-agent steps already installed chromium and `@playwright/test` lives in `node_modules`,
-so you can run a real spec in-agent with no install and no egress. Check it is available:
+### A. Primary — write ONE focused spec and run it (config + auth are already provided)
+Chromium + `@playwright/test` are pre-installed, and the runner already wrote `tests/uiqa/qa.config.ts`
+(correct config) and `tests/.auth/user.json` (signed-in `admin` storageState). **You do not write a
+config and you do not handle auth** — you write ONE spec and run it. Check the runner is ready:
 
 ```bash
 cat /tmp/gh-aw/agent/pw-runner-status.txt   # "ready" -> use this path; "unavailable" -> use B
 ```
 
-Write a QA config at `tests/uiqa/qa.config.ts` that runs **care_fe's own setup project** (Step 2)
-and then your focused spec at both viewports. It points the harness at the sandbox origin (the only
-one you can reach) and reuses the signed-in `storageState` the setup project captured — so you do
-NOT manually inject tokens, and every care_fe helper works. The config MUST:
-- set `baseURL: 'http://host.docker.internal'` (overrides the repo default `localhost:4000`);
-- have **NO `webServer`** and **NO `globalSetup`** (the app + backend are already served on :80; the
-  repo defaults would spawn a second server on :4000 and try to restore a DB snapshot);
-- include care_fe's `setup` project, then `desktop` (1366x768) and `mobile` (390x844) projects that
-  depend on it and reuse `tests/.auth/user.json` for auth;
-- report JSON to `/tmp/gh-aw/agent/qa-results.json`.
-
-```bash
-mkdir -p tests/uiqa /tmp/gh-aw/agent
-cat > tests/uiqa/qa.config.ts <<'EOF'
-import { defineConfig, devices } from '@playwright/test';
-export default defineConfig({
-  testDir: '..',                       // repo tests/ root: care_fe setup files + your uiqa spec
-  fullyParallel: false, retries: 0,
-  reporter: [['json', { outputFile: '/tmp/gh-aw/agent/qa-results.json' }], ['list']],
-  outputDir: '/tmp/gh-aw/agent/qa-artifacts',
-  use: { baseURL: 'http://host.docker.internal', trace: 'off' },
-  projects: [
-    // care_fe's own setup: auth.setup logs in + saves tests/.auth/user.json; the others
-    // discover baseline facility/patient/encounter IDs. Run it explicitly first (Step 2).
-    // NO `dependencies` here on purpose: a single non-essential setup failure must not skip
-    // the whole QA spec — as long as auth.setup wrote user.json you can proceed.
-    { name: 'setup', testMatch: /setup\/.*\.setup\.ts/, fullyParallel: false },
-    { name: 'desktop', testMatch: /uiqa\/.*\.spec\.ts/,
-      use: { ...devices['Desktop Chrome'], viewport: { width: 1366, height: 768 }, storageState: 'tests/.auth/user.json' } },
-    { name: 'mobile', testMatch: /uiqa\/.*\.spec\.ts/,
-      use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, storageState: 'tests/.auth/user.json' } },
-  ],
-});
-EOF
-```
-
-Your focused spec goes at `tests/uiqa/<KEY>.spec.ts`. Because it runs with care_fe's `storageState`
-you are **already logged in** — no token injection. **Reuse care_fe's helpers and the create-flow
-you found in Step 3b** to build the PR-specific data, then `expect(...)` the specific changed
-element and screenshot full-page. Skeleton (adapt to your feature; import the real helpers you need):
+Write your focused spec at `tests/uiqa/<KEY>.spec.ts`. It runs under `qa.config.ts`, so it is
+**already logged in** (no token code) and baseURL is the sandbox origin. **Reuse care_fe's helpers and
+the create-flow you found in Step 3b** to build the PR-specific data through the real UI, then
+`expect(...)` the changed element and screenshot full-page. Skeleton (adapt; import the helpers your
+flow uses):
 
 ```ts
 import { test, expect } from '@playwright/test';
-import { getFacilityId } from 'tests/support/facilityId';
-// import { selectFromCommand, expectToast } from 'tests/helper/ui';  // reuse what the flow needs
+// import { selectFromValueSet, expectToast, clickTabOrMenuItem } from 'tests/helper/ui'; // reuse
 test('changed feature renders', async ({ page }, testInfo) => {
-  const facilityId = getFacilityId();                 // baseline ID from the setup project
-  // 1. SEED via the real flow (reuse the steps from the spec you found in 3b) — e.g. create the
-  //    service request + a diagnostic report per code through their create pages, asserting toasts.
-  // 2. Navigate to the changed surface and ASSERT the specific outcome the PR adds:
-  await page.goto(`/facility/${facilityId}/<changed-route>`);
+  // 1. Navigate the baseline UI to a facility/patient/encounter ("Facility with Patient" fixture).
+  // 2. CREATE the feature's data THROUGH THE UI, reusing the create flow from the spec you found in
+  //    3b (e.g. ServiceRequestCreate.spec.ts): open the create page, fill with the care_fe helpers,
+  //    submit, assert the success toast. (Any pure backend-config prerequisite — e.g. a multi-code
+  //    ActivityDefinition — you already built via the seed bridge in Step 3d.)
+  // 3. Navigate to the changed surface and ASSERT the specific outcome the PR adds:
+  await page.goto('/<changed-route>');
   await expect(page.getByText('<the new label / Nth row / count>')).toBeVisible(); // the real gate
   await page.screenshot({ path: `/tmp/gh-aw/agent/feature-${testInfo.project.name}.png`, fullPage: true });
 });
 ```
 
-Run the setup project (Step 2) if you have not already, then the focused spec at both viewports and
-read the machine verdict:
+Run it at both viewports and read the machine verdict. **Always pass `--config tests/uiqa/qa.config.ts`**
+— a bare `npx playwright test` picks up the repo default config, which spawns a second server on :4000
+and runs a `globalSetup` that breaks on this origin:
 
 ```bash
 cd "$GITHUB_WORKSPACE"
