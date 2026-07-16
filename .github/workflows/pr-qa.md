@@ -3,14 +3,14 @@ description: >
   Visual QA for care_fe pull requests — the `state:qa` stage of the linear
   pipeline (see docs/PIPELINE.md). Pre-agent runner steps boot the full care backend (Docker:
   db+redis+celery+backend + baseline fixtures), build the PR head pointed at a same-origin API
-  proxy, serve both on one port, and provision a fresh-login Playwright config that wires care_fe's own
-  setup specs (so facility/patient/encounter meta exist and care_fe's real UI helpers work). ALL
-  feature data — transactional entities AND their config prerequisites — is built by DRIVING care_fe's
-  own Playwright flows/helpers in the agent's spec; there is no backend seed bridge, because entities
-  created behind the app's back land in the wrong category/version and never appear in the app's
-  pickers. For example an ActivityDefinition with multiple diagnostic_report_codes is created through
-  the real AD settings form (its codes field is multi-value), so it lands in the right category as the
-  latest version and the service-request picker finds it. The agent authenticates via the provided
+  proxy, serve both on one port, provision a fresh-login Playwright config that wires care_fe's own
+  setup specs (so facility/patient/encounter meta exist and care_fe's real UI helpers work), and
+  deterministically provision the feature's backend config prerequisite (care's service-request
+  picker filters ActivityDefinitions by facility + the "Lab Tests" ResourceCategory, so a from-scratch
+  seed is invisible — instead the runner adjusts an existing pickable baseline AD, e.g. gives
+  "Lipid Panel" two diagnostic_report_codes; the ServiceRequest reads the AD live via FK). The agent
+  then builds the TRANSACTIONAL data (service requests, diagnostic reports, specimen collection) by
+  DRIVING care_fe's own Playwright helpers, authenticates via the provided
   storageState, drives the feature, and captures
   durable desktop+mobile screenshots which it publishes with upload-asset. Durable screenshots are a
   HARD GATE: with no verified screenshot the PR can never reach state:ready. A clean pass advances to
@@ -376,6 +376,51 @@ steps:
       echo "provisioned tests/uiqa/qa.config.ts + qa.globalsetup.ts"
       ls -la tests/.auth/user.json tests/uiqa/qa.config.ts tests/uiqa/qa.globalsetup.ts 2>&1 || true
 
+  - name: Ensure a multi-code ActivityDefinition exists (deterministic QA prerequisite)
+    continue-on-error: true
+    run: |
+      set -uo pipefail
+      mkdir -p /tmp/gh-aw/agent
+      echo "none" > /tmp/gh-aw/agent/multicode-ad-status.txt
+      if [ "$(cat /tmp/gh-aw/agent/backend-status.txt 2>/dev/null)" != "up" ]; then
+        echo "backend not up — skipping multi-code AD provisioning"; exit 0
+      fi
+      # care's service-request picker lists ActivityDefinitions by facility + ResourceCategory
+      # ("Lab Tests"), so an AD is only pickable if it already carries those linkages. Rather than
+      # create one from scratch (which requires replicating category/version/status/slug exactly),
+      # we ADJUST an existing, already-pickable baseline AD ("Lipid Panel", loaded by load-fixtures
+      # in the Lab Tests category with ONE diagnostic_report_code) to carry TWO codes. The
+      # ServiceRequest references the AD by FK and reads diagnostic_report_codes LIVE, so any SR
+      # later ordered against "Lipid Panel" renders one DiagnosticReportForm per code — exactly the
+      # ENG-503 feature. This runs in-container via the /__qa_seed bridge (the only place with ORM
+      # access); it is a surgical field update on a validated object, idempotent, and safe to repeat.
+      cat > /tmp/gh-aw/agent/ensure-multicode-ad.py <<'EOF'
+      from care.emr.models.activity_definition import ActivityDefinition
+      TWO_CODES = [
+          {"code": "LP97557-0", "system": "http://loinc.org", "display": "Lipid panel with direct LDL"},
+          {"code": "LP7681-2",  "system": "http://loinc.org", "display": "Urinalysis panel"},
+      ]
+      qs = ActivityDefinition.objects.filter(title="Lipid Panel", latest=True)
+      n = 0
+      for ad in qs:
+          ad.diagnostic_report_codes = TWO_CODES
+          ad.save(update_fields=["diagnostic_report_codes"])
+          n += 1
+          print("QA-MULTICODE-AD", ad.slug, "codes", len(ad.diagnostic_report_codes))
+      print("QA-MULTICODE-COUNT", n)
+      EOF
+      curl -s -o /tmp/gh-aw/agent/multicode-ad.log -X POST http://localhost:80/__qa_seed \
+        --data-binary @/tmp/gh-aw/agent/ensure-multicode-ad.py || true
+      cat /tmp/gh-aw/agent/multicode-ad.log 2>/dev/null || true
+      if grep -q 'QA-SEED-EXIT: 0' /tmp/gh-aw/agent/multicode-ad.log 2>/dev/null \
+         && ! grep -q 'QA-MULTICODE-COUNT 0' /tmp/gh-aw/agent/multicode-ad.log 2>/dev/null; then
+        echo "ready" > /tmp/gh-aw/agent/multicode-ad-status.txt
+        echo "multi-code 'Lipid Panel' ActivityDefinition is provisioned"
+      else
+        echo "failed" > /tmp/gh-aw/agent/multicode-ad-status.txt
+        echo "::warning::could not provision the multi-code AD; the agent must construct one via the UI"
+      fi
+
 # Always tear the seeded backend down, even if the agent or build failed, so a crashed run
 # never leaves Docker services holding the runner.
 post-steps:
@@ -585,83 +630,54 @@ rediscover them.
 
 ## Step 3 — Build the feature's data by DRIVING care_fe's own UI flows
 
-**HARD RULE: build every entity the feature needs — transactional AND config — through care_fe's
-own product UI, in your Playwright spec, reusing the helpers/page-objects under `tests/**` and the
-setup-provided IDs. Do NOT write a Python/`care_fixture_context()`/ORM/REST seed script, and do NOT
-POST to any `/__qa_seed` endpoint — that bridge is gone.** This is the entire reliability model, and
-it is non-negotiable: entities created behind the app's back (raw ORM or a fixture API) land in the
-wrong category / not the latest published version and then **never appear in the app's pickers** —
-which is exactly why every seed-based run failed. The app only reliably sees data the app itself
-created. care_fe's UI flows are maintained by care_fe and CI-proven, so they produce exactly the
-state the app reads. If a genuine prerequisite has no product-UI path at all, you do not seed it —
-you escalate `state:human` naming it (that is rare; a settings/admin page almost always exists).
+Build the feature's **transactional** data (ServiceRequest, DiagnosticReport, specimen collection,
+…) by DRIVING care_fe's own UI flows in your Playwright spec — reuse the helpers/page-objects under
+`tests/**` (e.g. `createServiceRequest`) with the setup-provided IDs, never hand-rolled selectors and
+never a REST/ORM seed. care_fe's UI flows are CI-proven and produce exactly the state the app reads.
 
-### 3a. DECIDE the graph
+The **one backend config prerequisite** this feature needs — an ActivityDefinition with ≥2
+`diagnostic_report_codes` — has already been **provisioned for you** by the runner (care's
+service-request picker filters ADs by facility + the "Lab Tests" `ResourceCategory`, so a
+from-scratch seed is invisible; instead the runner adjusted an existing pickable baseline AD). You do
+**not** create it. Confirm it and use it.
+
+### 3a. Confirm the provisioned prerequisite, then DECIDE the graph
+
+```bash
+cat /tmp/gh-aw/agent/multicode-ad-status.txt   # "ready" = a multi-code "Lipid Panel" AD exists
+grep '^QA-MULTICODE-AD' /tmp/gh-aw/agent/multicode-ad.log 2>/dev/null   # its slug + code count (2)
+```
+
+- **`ready`** → the baseline **"Lipid Panel"** ActivityDefinition now carries **two**
+  `diagnostic_report_codes` and is pickable in the Lab Tests category. Use it in 3b.
+- **`failed`/`none`** → escalate `state:human` (infra: the prerequisite could not be provisioned and
+  you must not fake it) — do not seed one yourself.
 
 List the changed files (`pull_requests` toolset or
 `git diff --name-only "$(git merge-base HEAD origin/HEAD)"...HEAD`) and map them to the feature
-surface and the exact data it keys on. Split it into (i) a config prerequisite you create via a
-settings/admin page and (ii) the transactional entities you create via the feature's own flow.
+surface so your spec drives the exact flow.
 
-### 3b. CREATE the config prerequisite through its settings-page UI
+### 3b. ORDER the AD as a ServiceRequest and drive a report per code
 
-For ENG-503 the prerequisite is an **ActivityDefinition with ≥2 `diagnostic_report_codes`**, and the
-AD create form supports exactly that: the `diagnostic_report_codes` field is a **multi-value**
-`ValueSetSelect` (placeholder *"search for diagnostic codes"*, system `system-observation`) that
-**appends** each selected code as a removable row. So create it through the real form — it lands in
-the **"Lab Tests"** category (`f-<facilityId>-lab-tests-activity-definition`) that
-`createServiceRequest` navigates to, as the latest published version. Reuse
-`tests/facility/settings/activityDefinition/activityDefinition.ts` (`createActivityDefinition`,
-`generateActivityDefinitionData`, its `selectFromValueSet` calls) — the ONE difference is you select
-**two distinct** diagnostic codes instead of one:
-
-```ts
-import { getFacilityId } from "tests/support/facilityId";
-import { selectFromValueSet } from "tests/helper/ui";
-// In your spec, before creating the service request:
-const facilityId = getFacilityId();
-await page.goto(`/facility/${facilityId}/settings/activity_definitions/categories/f-${facilityId}-lab-tests-activity-definition/new`);
-await page.getByLabel(/title.*\*/i).fill("QA Multi-Report Panel");
-await page.getByLabel(/description.*\*/i).fill("QA multi diagnostic report panel");
-await page.getByLabel(/usage.*\*/i).fill("QA");
-await page.getByLabel(/^status$/i).click();
-await page.getByRole("option", { name: "Active" }).click();
-// classification + kind (Service Request) + code — copy these from createActivityDefinition(allFields)
-// diagnostic_report_codes is MULTI-VALUE: select TWO codes so the feature has >1 to render
-const diag = page.getByRole("combobox").filter({ hasText: /search.*diagnostic/i });
-await selectFromValueSet(page, diag, { search: "Cholesterol" });
-await selectFromValueSet(page, diag, { search: "Triglyceride" });
-await expect(page.getByText(/\(.*\)/).first()).toBeVisible(); // both codes now listed as rows
-await page.getByRole("button", { name: /^create$/i }).click();
-await expect(page.getByText(/activity definition created successfully/i)).toBeVisible();
-```
-
-Read `createActivityDefinition` (lines ~149–256) for the exact classification/kind/code selectors and
-required fields; only the diagnostic-codes step differs (two selections, not one). Verify the created
-AD really has two codes (both rows visible) **before** moving on — that assertion is what past runs
-skipped. If a form step is awkward, fix the selector against the running app — never abandon the form
-and fall back to a seed.
-
-### 3c. BUILD the transactional flow in your spec by reusing care_fe's helpers
-
-Then order that AD as a ServiceRequest and drive the reports, reusing care_fe's helpers with the
-setup IDs — do not hand-roll the picker:
+In your spec, order the provisioned **"Lipid Panel"** AD via `createServiceRequest` (it is found in
+the Lab Tests picker), then collect the specimen and create a DiagnosticReport **per code**:
 
 ```ts
 import { createServiceRequest } from "tests/facility/patient/encounter/serviceRequests/serviceRequest";
+import { getFacilityId } from "tests/support/facilityId";
 import { getPatientId } from "tests/support/patientId";
 import { getEncounterId } from "tests/support/encounterId";
 // ...
 const sr = await createServiceRequest(page, getFacilityId(), getPatientId(), getEncounterId(),
-  false, { activityDefinition: "QA Multi-Report Panel" });   // found in the Lab Tests picker
+  false, { activityDefinition: "Lipid Panel" });   // the provisioned multi-code AD
 ```
 
 Read the matching create spec (`ServiceRequestCreate.spec.ts`, plus any specimen/report specs) for
-the follow-on flow (collect the specimen, then create a DiagnosticReport **per code**), and reuse
+the follow-on flow (collect the specimen, then create a DiagnosticReport for each code), and reuse
 those helpers too. If a helper doesn't exist for a step, follow `tests/PLAYWRIGHT_GUIDE.md` and the
 closest existing spec's pattern — never invent raw selectors when a helper exists, and never seed.
 
-### 3d. KNOWN care_fe gotcha — empty reports/cards render NOTHING
+### 3c. KNOWN care_fe gotcha — empty reports/cards render NOTHING
 
 Several review surfaces short-circuit to `null` when their entity has no data. In particular
 `DiagnosticReportReview` renders a card for a report **only if** that report has at least one
@@ -703,13 +719,13 @@ import { getEncounterId } from 'tests/support/encounterId';
 test('changed feature renders', async ({ page }, testInfo) => {
   // 1. Use the setup-provided IDs (do NOT re-navigate the baseline UI to find them):
   const facilityId = getFacilityId(), patientId = getPatientId(), encounterId = getEncounterId();
-  // 2. BUILD the feature's data THROUGH THE UI in this order (all via care_fe's own flows, Step 3b–3c):
-  //    a. create the config prerequisite — for ENG-503, an ActivityDefinition with TWO
-  //       diagnostic_report_codes via the AD create form (the codes field is multi-value; select two);
-  //    b. order it as a ServiceRequest with createServiceRequest(page, facilityId, patientId,
-  //       encounterId, false, { activityDefinition: "QA Multi-Report Panel" });
-  //    c. collect the specimen, create a DiagnosticReport per code, and enter a conclusion on each
-  //       (empty reports render nothing — see Step 3e).
+  // 2. BUILD the feature's data THROUGH THE UI (via care_fe's own flows, Step 3b). The multi-code
+  //    ActivityDefinition prerequisite is already provisioned ("Lipid Panel" with two
+  //    diagnostic_report_codes — see Step 3a), so you just:
+  //    a. order it as a ServiceRequest with createServiceRequest(page, facilityId, patientId,
+  //       encounterId, false, { activityDefinition: "Lipid Panel" });
+  //    b. collect the specimen, create a DiagnosticReport per code, and enter a conclusion on each
+  //       (empty reports render nothing — see Step 3c).
   // 3. Navigate to the changed surface and ASSERT the specific outcome the PR adds (assert BEFORE the
   //    shot — you may have no vision model), e.g. exactly N rendered cards:
   await expect(page.locator('[data-slot="collapsible"]')).toHaveCount(2); // the real gate
