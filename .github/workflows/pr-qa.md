@@ -3,18 +3,17 @@ description: >
   Backend-seeded Visual QA for care_fe pull requests — the `state:qa` stage of the linear
   pipeline (see docs/PIPELINE.md). Pre-agent runner steps boot the full care backend (Docker:
   db+redis+celery+backend + baseline fixtures), build the PR head pointed at a same-origin API
-  proxy, and serve both on one port. QA is INDEPENDENT of the author/rework agents: it constructs
-  its own data every run. Crucially it REUSES care_fe's own Playwright test harness (tests/setup,
-  tests/helper, tests/support, and existing feature specs) — the same one care's developers keep
-  green — to authenticate, seed the exact data graph the feature needs THROUGH the product's real
-  create flows, navigate to the changed surface, and capture durable desktop+mobile screenshots
-  which it publishes with upload-asset. It never hand-writes raw Django ORM (the cause of
-  IntegrityError seeding failures); a validated CareFixtureBase seed bridge remains only as a
-  last-resort for backend prerequisites no UI flow can create. Durable screenshots are a HARD
-  GATE: with no verified screenshot the PR can never reach state:ready. A clean pass advances to
-  state:ready; an observed UI defect advances to state:rework (with findings the fixer can act on);
-  an infrastructure failure or a data state that could not be constructed — neither the PR's fault
-  — escalates to state:human, never a verdict from adjacent-surface evidence. The backend is always
+  proxy, serve both on one port, provision a fresh-login Playwright config, and restore+apply this
+  PR's stored data seed. The feature's data recipe is authored ONCE (a validated
+  `care_fixture_context()` script that hits the real DRF viewsets — never raw ORM), stored in a
+  durable `<!-- qa-seed-script -->` PR comment, and REPLAYED deterministically on every later run and
+  on any PR (the seed lives in a comment, not on the branch, so forks/random PRs work too). The agent
+  then authenticates via the provided storageState, navigates to the seeded feature, and captures
+  durable desktop+mobile screenshots which it publishes with upload-asset. Durable screenshots are a
+  HARD GATE: with no verified screenshot the PR can never reach state:ready. A clean pass advances to
+  state:ready; an observed UI defect advances to state:rework (with findings the fixer can act on); an
+  infrastructure failure or a data state that could not be constructed — neither the PR's fault —
+  escalates to state:human, never a verdict from adjacent-surface evidence. The backend is always
   torn down. Reports the QA outcome back to the linked JIRA issue.
 
 # Stage trigger: fire when `state:qa` is applied to a PR. gh-aw auto-removes the
@@ -109,8 +108,10 @@ safe-outputs:
   github-token: ${{ secrets.GH_AW_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
   # Durable screenshots are the MANDATORY pass gate — publish every representative capture.
   upload-asset:
+  # max 2: one evidence comment + (on the first run) one durable `<!-- qa-seed-script -->` comment
+  # storing the validated seed so later runs (and any re-QA on any PR) replay it deterministically.
   add-comment:
-    max: 1
+    max: 2
   # Drive the linear pipeline. Exactly one state label is added per run (max: 1) and the whole
   # set may be cleared first (remove-labels) so the PR always carries exactly one state:*.
   # `allowed` is restricted to the three VERDICT labels: the agent must never re-emit
@@ -360,6 +361,63 @@ steps:
       echo "provisioned tests/uiqa/qa.config.ts + qa.globalsetup.ts"
       ls -la tests/.auth/user.json tests/uiqa/qa.config.ts tests/uiqa/qa.globalsetup.ts 2>&1 || true
 
+  - name: Restore and apply a stored QA seed (deterministic replay across runs / any PR)
+    continue-on-error: true
+    env:
+      GH_TOKEN: ${{ secrets.GH_AW_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+    run: |
+      set -uo pipefail
+      mkdir -p /tmp/gh-aw/agent
+      # The data recipe for this PR's feature is stored ONCE (validated) in a durable PR comment
+      # marked `<!-- qa-seed-script -->` (see the QA prompt). It lives in a COMMENT, not on the PR
+      # branch, so it works for forks and any PR and needs no push access. Here, pre-agent, we
+      # restore the latest such seed and apply it via the /__qa_seed bridge so the exact data state
+      # exists deterministically before the agent runs. First-ever run finds none — the agent then
+      # authors + validates + stores it, and every subsequent run replays it here.
+      echo "none" > /tmp/gh-aw/agent/seed-status.txt
+      if [ "$(cat /tmp/gh-aw/agent/backend-status.txt 2>/dev/null)" != "up" ]; then
+        echo "backend not up — skipping seed restore"; exit 0
+      fi
+      gh api "repos/$REPO/issues/$PR/comments" --paginate > /tmp/gh-aw/agent/pr-comments.json 2>/dev/null \
+        || echo '[]' > /tmp/gh-aw/agent/pr-comments.json
+      cat > /tmp/gh-aw/agent/extract_seed.py <<'EOF'
+      import json, re
+      try:
+          comments = json.load(open("/tmp/gh-aw/agent/pr-comments.json"))
+      except Exception:
+          comments = []
+      seed = None
+      for c in comments:  # last marked comment wins (freshest seed)
+          body = c.get("body", "") or ""
+          if "<!-- qa-seed-script -->" in body:
+              m = re.search(r"```(?:python)?\n(.*?)\n```", body, re.S)
+              if m:
+                  seed = m.group(1)
+      if seed and seed.strip():
+          open("/tmp/gh-aw/agent/stored-seed.py", "w").write(seed)
+          print("FOUND")
+      else:
+          print("NONE")
+      EOF
+      python3 /tmp/gh-aw/agent/extract_seed.py
+      if [ -f /tmp/gh-aw/agent/stored-seed.py ]; then
+        echo "applying stored QA seed via the bridge ..."
+        curl -s -o /tmp/gh-aw/agent/seed-apply.log -X POST http://localhost:80/__qa_seed \
+          --data-binary @/tmp/gh-aw/agent/stored-seed.py || true
+        if grep -q 'QA-SEED-EXIT: 0' /tmp/gh-aw/agent/seed-apply.log 2>/dev/null; then
+          echo "applied" > /tmp/gh-aw/agent/seed-status.txt
+          echo "stored seed applied cleanly (agent should verify + screenshot, not re-author)"
+        else
+          echo "failed" > /tmp/gh-aw/agent/seed-status.txt
+          echo "::warning::stored seed did not apply cleanly; agent will re-author it"
+          tail -25 /tmp/gh-aw/agent/seed-apply.log 2>/dev/null || true
+        fi
+      else
+        echo "no stored seed yet — agent will author + validate + store one this run"
+      fi
+
 # Always tear the seeded backend down, even if the agent or build failed, so a crashed run
 # never leaves Docker services holding the runner.
 post-steps:
@@ -556,113 +614,108 @@ a facility named "Facility with Patient" with patients and encounters, exactly w
 through. (Do not rely on `getFacilityId()`/`*Meta.json` — those come from the setup project you are
 not running.)
 
-## Step 3 — Reach and seed the EXACT changed surface by reusing care_fe's flows
+## Step 3 — Ensure the feature's data exists (stored, deterministic seed)
 
-This is the heart of QA, and the reason it generalises to any feature: instead of inventing seed
-data, you **construct the required state through care_fe's own product flows** — the same way a user
-(and care's own test suite) creates it. Never write raw Django ORM (`Model.objects.create`) — that
-bypasses validation and fails with `IntegrityError` on the real relational graph.
+The data your feature needs (e.g. a ServiceRequest whose ActivityDefinition has ≥2
+`diagnostic_report_codes`) is created by a **seed script that is authored ONCE, validated, and stored
+in a durable PR comment**, then **replayed deterministically** on every later run by the runner. This
+is the whole reliability model: the "how to load" is solved once and reused, not re-improvised each
+run. It works on **any PR** (the seed lives in a comment, never on the branch).
 
-### 3a. DECIDE — the surface and the data graph it needs
-
-1. List the PR's changed files (the `pull_requests` toolset, or
-   `git diff --name-only "$(git merge-base HEAD origin/HEAD)"...HEAD`).
-2. Map them to the **primary** feature route/flow, and write down the exact data graph that surface
-   needs to render the change (e.g. "a ServiceRequest whose ActivityDefinition has >=2
-   `diagnostic_report_codes`, with a DiagnosticReport per code").
-
-### 3b. FIND the existing flow in care_fe's test suite
-
-care_fe almost always already has a spec or helper that creates the entities you need. Search for it:
+### 3a. Was the seed already applied this run?
 
 ```bash
-grep -rniE "<entity or route keyword>" tests --include=*.ts -l | head
-# e.g. for ENG-503: grep -rniE "service.?request|diagnostic" tests -l
-#   -> tests/facility/patient/encounter/serviceRequests/ServiceRequestCreate.spec.ts
+cat /tmp/gh-aw/agent/seed-status.txt      # applied | failed | none
 ```
 
-Read the matching spec(s) and the helpers they call. They encode the real create flow (routes,
-form steps, valueset pickers, toasts) for that entity — proven and current. This is your template.
+- **`applied`** → the runner already restored a stored seed and built the data. **Do NOT author
+  anything.** Read the entity IDs it created and go straight to Step 4 (verify + screenshot):
 
-### 3c. SEED by driving the real flow in your focused spec (primary)
+  ```bash
+  grep '^QA-SEED' /tmp/gh-aw/agent/seed-apply.log      # the external_ids to navigate to
+  ```
 
-In the focused spec you write in Step 4, **create the PR-specific data by reusing those helpers and
-flow steps** — navigate the create pages, fill the forms with the care_fe helpers, submit, and
-assert the success toast — exactly as `ServiceRequestCreate.spec.ts` (or the analogue for your
-feature) does. Reach the parent records by **navigating the baseline UI** (open the "Facility with
-Patient" fixture, pick a patient/encounter) rather than `getFacilityId()`/meta files. Build the graph
-top-down (facility -> patient -> encounter -> the feature entity), reusing an existing baseline
-record wherever one already exists.
+- **`none`** (first run for this PR) or **`failed`** (stored seed is stale/broken) → you must
+  **author, validate, and store** the seed now (3b–3e).
 
-This is dynamic and general: any state the product can reach, you reach the same way the product's
-own tests do — no per-feature recipe baked into this workflow.
+### 3b. DECIDE the data graph
+List the changed files (`pull_requests` toolset or
+`git diff --name-only "$(git merge-base HEAD origin/HEAD)"...HEAD`), map them to the primary feature
+surface, and write down the exact graph it needs (org → facility → patient → encounter → the feature
+entity, with the specific fields the feature keys on).
 
-> **Create the feature's entities THROUGH THE UI, never through the seed bridge.** The ServiceRequest,
-> the DiagnosticReports, etc. are created by driving their real create pages in your spec (3c). Do
-> **not** try to create them with `manage.py`/ORM via `/__qa_seed` — there is no fixture method for
-> every entity, raw ORM hits `IntegrityError`/missing-field errors (it has repeatedly burned entire
-> QA runs), and creating via the UI is the whole point of QA. The seed bridge (3d) is ONLY for a
-> backend-config prerequisite that has no create flow at all.
+### 3c. AUTHOR the seed — a `care_fixture_context()` script that uses the REAL create endpoints
+Write the seed with the `write` tool to `/tmp/gh-aw/agent/qa-seed.py`. It MUST:
+- open `care_fixture_context()` (gives a superuser-authenticated DRF client that hits the **real
+  viewsets**, so everything is validated and committed on success);
+- build the graph with `base.create_*` helpers where they exist, and for entities that have **no
+  helper** (e.g. ServiceRequest, DiagnosticReport) call the real create endpoint directly with
+  `base.post(reverse("<viewset>-list", kwargs=...), data)` — **NEVER raw ORM** (`Model.objects...`
+  bypasses validation and fails);
+- be **idempotent** (look up before create) so replay is safe;
+- `print("QA-SEED <label> <external_id>")` for each key entity so both you and future runs can
+  navigate to them.
 
-### 3d. Build a named prerequisite yourself — do NOT escalate what you can name
+Discover the exact endpoints/fields from care_fe's typed routes and the backend serializers — e.g.
+the ServiceRequest create route is `POST /api/v1/facility/{facilityId}/service_request/`
+(`src/types/emr/serviceRequest/serviceRequestApi.ts` → `createServiceRequest`; body =
+`ServiceRequestCreateSpec`). Read them first:
 
-**If you can name the exact data the feature needs, you can almost always create it — so create it,
-do not escalate.** Many features render only in a specific backend state the baseline fixtures don't
-include (e.g. ENG-503 renders multiple report forms only when the ActivityDefinition has **≥2
-`diagnostic_report_codes`**). That is a prerequisite to build, NOT a reason to hand off to a human.
+```bash
+grep -n "def create_" care/care/fixtures/base.py
+sed -n '1,60p' src/types/emr/serviceRequest/serviceRequestApi.ts
+grep -rn "reverse(" care/care/fixtures/base.py | head
+```
 
-Two ways to build it, in order of preference:
+Sketch (adapt — read base.py for exact required args):
 
-1. **Through care_fe's own admin/create UI**, if the app exposes one (many config records —
-   ActivityDefinitions, HealthcareServices, etc. — are created under facility settings). Reuse the
-   matching `tests/**` spec/helper exactly as in 3b/3c.
-2. **Through the validated fixture bridge** when there is no UI flow (or it is impractically deep).
-   Write a small `CareFixtureBase` script and POST it — **only `base.create_*` / `base` helper calls,
-   NEVER raw ORM** (`Model.objects...` bypasses validation and fails with IntegrityError — it has
-   repeatedly wasted whole runs). Discover the method and its fields first:
+```python
+# /tmp/gh-aw/agent/qa-seed.py
+from django.urls import reverse
+from care.fixtures.context import care_fixture_context
+with care_fixture_context() as base:
+    org = base.create_organization(name="QA ENG-503 Org")
+    facility = base.create_facility(org.id, name="QA ENG-503 Facility")
+    patient = base.create_patient(org.id)
+    encounter = base.create_encounter(patient.id, facility.id)
+    ad = base.create_activity_definition(facility.id, title="QA Multi-Code Panel", code=...,
+        locations=[...], specimen_requirements=[...], observation_result_requirements=[...],
+        charge_item_definitions=[...], diagnostic_report_codes=[code_a, code_b])
+    sr = base.post(reverse("service_request-list", kwargs={"facility_external_id": facility.external_id}),
+                   {"encounter": encounter.external_id, "activity_definition": ad.slug, ...})
+    print("QA-SEED facility", facility.external_id)
+    print("QA-SEED patient", patient.external_id)
+    print("QA-SEED encounter", encounter.external_id)
+    print("QA-SEED service_request", sr.external_id)
+```
 
-   ```bash
-   cat care/care/fixtures/fixtures.md
-   grep -nA20 "def create_activity_definition" care/care/fixtures/base.py   # or your entity
-   curl -s -X POST http://host.docker.internal/__qa_seed --data-binary @/tmp/gh-aw/agent/qa-seed-1.py
-   ```
+### 3d. VALIDATE the seed against the bridge (iterate on the API's errors)
 
-   Every `create_*` method forwards `**kwargs` into the request body, so feature-specific fields go
-   straight in — e.g. to satisfy ENG-503:
+```bash
+curl -s -X POST http://host.docker.internal/__qa_seed --data-binary @/tmp/gh-aw/agent/qa-seed.py
+```
 
-   ```python
-   # /tmp/gh-aw/agent/qa-seed-1.py  (illustrative — read base.py for the exact required args)
-   from care.fixtures.context import care_fixture_context
-   with care_fixture_context() as base:
-       org = base.create_organization(name="QA Org")
-       facility = base.create_facility(org.id, name="QA Hospital")
-       ad = base.create_activity_definition(
-           facility.id, title="QA Multi-Code Panel", code=..., locations=[...],
-           specimen_requirements=[...], observation_result_requirements=[...],
-           charge_item_definitions=[...],
-           diagnostic_report_codes=[code_a, code_b],   # the ≥2 codes the feature needs
-       )
-       print("QA-SEED activity_definition", ad.slug)
-   ```
+The response ends `QA-SEED-EXIT: <n>`; it must be `0` AND print your `QA-SEED` id lines. On a non-zero
+exit, read the traceback — it names the wrong field/endpoint — fix the script and resubmit. **Cap: 5
+attempts.** The API's validation errors converge you (unlike opaque ORM errors). If you genuinely
+cannot construct it after 5 tries, escalate honestly (Step 7 `state:human`) with the exact errors.
 
-The script opens `care_fixture_context()` (validated, commits on success; response ends
-`QA-SEED-EXIT: 0`). The feature's *own* entities should still be created through its real UI flow
-(3c) so QA proves that flow — use the bridge for the config/prerequisite records behind it. Cap: at
-most 4 attempts, fixing the script from each traceback; never resend an identical failing script.
+### 3e. STORE the validated seed so every future run replays it
 
-### 3e. Escalate ONLY when you cannot build it even knowing exactly what it is
+Once the seed applied cleanly, emit it with `add-comment` so the runner can replay it pre-agent on
+every later run (a rework re-QA, a watchdog re-run, or a fresh `state:qa` on ANY PR gets the data
+deterministically without re-authoring). The comment body MUST contain, in order:
 
-Escalation to `state:human` is a last resort for when the required state is genuinely unbuildable —
-NOT for a prerequisite you were able to name. Before escalating you must have actually **tried** to
-build the named prerequisite via 3d (a UI flow AND the fixture bridge) and hit a concrete blocker.
-If you can write the sentence "a human needs to create X", then X is something you should have
-created in 3d — go back and do it.
+1. the literal marker line `<!-- qa-seed-script -->`
+2. a short human sentence
+3. a fenced code block tagged `python` whose contents are the **exact** validated
+   `/tmp/gh-aw/agent/qa-seed.py`.
 
-If a build genuinely fails after those attempts, do **not** screenshot an adjacent surface and call
-it evidence. Go to Step 7 with **`state:human`** and an actionable report: `missing: <state> for
-<feature>; tried: <UI flow + fixture create_* calls, with the exact errors>; unblock: <the specific
-field/endpoint that rejected it>`. That structured report — proving you tried to build it, not just
-that it was absent — is the run's deliverable.
+The runner finds the freshest comment containing that marker, extracts the first ```python fenced
+block, and applies it. Keep the seed idempotent so replay never double-creates. Do not add other
+```python fences to that comment. Then continue to Step 4 to verify + screenshot using the IDs you
+printed.
+
 ## Step 4 — Exercise and capture before/after screenshots (desktop AND mobile — both mandatory)
 
 You have two ways to capture evidence. **Prefer the scripted spec runner (A)** — it makes the
