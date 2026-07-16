@@ -266,6 +266,7 @@ export default function ServiceRequestShow({
   const observationRequirements =
     activityDefinition.observation_result_requirements ?? [];
   const diagnosticReports = request.diagnostic_reports || [];
+  const reportCodes = activityDefinition.diagnostic_report_codes ?? [];
 
   const assignedSpecimenIds = new Set<string>();
 
@@ -323,7 +324,16 @@ export default function ServiceRequestShow({
   };
 
   const isFinal =
-    request?.diagnostic_reports?.[0]?.status === DiagnosticReportStatus.final;
+    reportCodes.length > 0
+      ? reportCodes.every((code) =>
+          diagnosticReports.some(
+            (report) =>
+              report.code?.code === code.code &&
+              report.status === DiagnosticReportStatus.final,
+          ),
+        )
+      : request?.diagnostic_reports?.[0]?.status ===
+        DiagnosticReportStatus.final;
 
   const canMarkAsComplete =
     isFinal ||
@@ -596,31 +606,71 @@ export default function ServiceRequestShow({
                 </DropdownMenu>
               </div>
             )}
-            {(!diagnosticReports.length ||
-              diagnosticReports[0]?.status !==
-                DiagnosticReportStatus.final) && (
-              <DiagnosticReportForm
-                patientId={request.encounter.patient.id}
-                facilityId={facilityId}
-                serviceRequestId={serviceRequestId}
-                observationDefinitions={observationRequirements}
-                diagnosticReports={diagnosticReports}
-                activityDefinition={activityDefinition}
-                specimens={request.specimens || []}
-                disableEdit={disableEdit}
-              />
+            {reportCodes.length > 0 ? (
+              reportCodes.map((code) => {
+                const reportsForCode = diagnosticReports.filter(
+                  (report) => report.code?.code === code.code,
+                );
+                const reportForCode = reportsForCode[0];
+                const showForm =
+                  !reportForCode ||
+                  reportForCode.status !== DiagnosticReportStatus.final;
+
+                return (
+                  <div key={code.code} className="space-y-3">
+                    {showForm && (
+                      <DiagnosticReportForm
+                        patientId={request.encounter.patient.id}
+                        facilityId={facilityId}
+                        serviceRequestId={serviceRequestId}
+                        observationDefinitions={observationRequirements}
+                        diagnosticReports={reportsForCode}
+                        activityDefinition={activityDefinition}
+                        specimens={request.specimens || []}
+                        disableEdit={disableEdit}
+                        reportCode={code}
+                      />
+                    )}
+                    {reportForCode && (
+                      <DiagnosticReportReview
+                        facilityId={facilityId}
+                        patientId={request.encounter.patient.id}
+                        serviceRequestId={serviceRequestId}
+                        diagnosticReports={reportsForCode}
+                        disableEdit={disableEdit}
+                      />
+                    )}
+                  </div>
+                );
+              })
+            ) : (
+              <>
+                {(!diagnosticReports.length ||
+                  diagnosticReports[0]?.status !==
+                    DiagnosticReportStatus.final) && (
+                  <DiagnosticReportForm
+                    patientId={request.encounter.patient.id}
+                    facilityId={facilityId}
+                    serviceRequestId={serviceRequestId}
+                    observationDefinitions={observationRequirements}
+                    diagnosticReports={diagnosticReports}
+                    activityDefinition={activityDefinition}
+                    specimens={request.specimens || []}
+                    disableEdit={disableEdit}
+                  />
+                )}
+                {diagnosticReports.length > 0 && (
+                  <DiagnosticReportReview
+                    facilityId={facilityId}
+                    patientId={request.encounter.patient.id}
+                    serviceRequestId={serviceRequestId}
+                    diagnosticReports={diagnosticReports}
+                    disableEdit={disableEdit}
+                  />
+                )}
+              </>
             )}
           </div>
-
-          {diagnosticReports.length > 0 && (
-            <DiagnosticReportReview
-              facilityId={facilityId}
-              patientId={request.encounter.patient.id}
-              serviceRequestId={serviceRequestId}
-              diagnosticReports={diagnosticReports}
-              disableEdit={disableEdit}
-            />
-          )}
         </div>
       </div>
       {!isMobile && (
