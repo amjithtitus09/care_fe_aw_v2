@@ -322,8 +322,18 @@ export default function ServiceRequestShow({
     }
   };
 
+  const completionReportCodes =
+    activityDefinition?.diagnostic_report_codes ?? [];
   const isFinal =
-    request?.diagnostic_reports?.[0]?.status === DiagnosticReportStatus.final;
+    completionReportCodes.length > 0
+      ? completionReportCodes.every((code) =>
+          diagnosticReports.some(
+            (report) =>
+              report.code?.code === code.code &&
+              report.status === DiagnosticReportStatus.final,
+          ),
+        )
+      : diagnosticReports[0]?.status === DiagnosticReportStatus.final;
 
   const canMarkAsComplete =
     isFinal ||
