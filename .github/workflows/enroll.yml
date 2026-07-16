@@ -54,6 +54,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # Deterministic CI workflows we wait on — MUST match the workflow_run trigger list above.
           GATING_CI: 'Lint Code Base|Unit Tests|Build PR Preview|Playwright Tests'
         run: |
@@ -77,6 +78,21 @@ jobs:
           # Mutual exclusivity: only enrol if the PR carries no state:* label yet.
           if printf '%s\n' "$labels" | grep -q '^state:'; then
             echo "PR #$PR_NUMBER already in a state:* stage — nothing to enrol."; exit 0
+          fi
+
+          # Keep the PR branch current with the default branch BEFORE enrolling. GitHub runs
+          # `pull_request`-triggered agentic stages (review/qa/rework) from the PR HEAD branch's
+          # workflow files — so an agent PR opened before a pipeline update would otherwise run a
+          # STALE QA/review workflow. update-branch merges the base in (best-effort, same-repo only,
+          # no-op when already current, safe-fails on conflict). The resulting sync commit re-runs CI;
+          # this enroll run then exits (checks pending) and the workflow_run trigger re-evaluates.
+          headRepo="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRepositoryOwner,isCrossRepository --jq '{x:.isCrossRepository}' | jq -r '.x')"
+          behind="$(gh api "repos/$REPO/compare/${DEFAULT_BRANCH}...$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName --jq '.headRefName')" --jq '.behind_by // 0' 2>/dev/null || echo 0)"
+          if [ "$headRepo" != "true" ] && [ "${behind:-0}" -gt 0 ]; then
+            echo "PR #$PR_NUMBER is $behind commit(s) behind ${DEFAULT_BRANCH} — updating branch so it runs the current workflows."
+            gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/update-branch" >/dev/null 2>&1 \
+              && { echo "Branch updated; CI will re-run and enrol re-evaluates on completion."; exit 0; } \
+              || echo "::warning::could not auto-update PR #$PR_NUMBER branch (conflict?); continuing with its current workflow."
           fi
 
           # Gate ONLY on the deterministic CI workflows (green or red). Ignore our own agentic
