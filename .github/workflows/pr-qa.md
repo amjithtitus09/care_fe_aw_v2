@@ -3,13 +3,17 @@ description: >
   Backend-seeded Visual QA for care_fe pull requests — the `state:qa` stage of the linear
   pipeline (see docs/PIPELINE.md). Pre-agent runner steps boot the full care backend (Docker:
   db+redis+celery+backend + baseline fixtures), build the PR head pointed at a same-origin API
-  proxy, serve both on one port, provision a fresh-login Playwright config, and restore+apply this
-  PR's stored data seed. The feature's data recipe is authored ONCE (a validated
-  `care_fixture_context()` script that hits the real DRF viewsets — never raw ORM), stored in a
-  durable `<!-- qa-seed-script -->` PR comment, and REPLAYED deterministically on every later run and
-  on any PR (the seed lives in a comment, not on the branch, so forks/random PRs work too). The agent
-  then authenticates via the provided storageState, navigates to the seeded feature, and captures
-  durable desktop+mobile screenshots which it publishes with upload-asset. Durable screenshots are a
+  proxy, serve both on one port, provision a fresh-login Playwright config that wires care_fe's own
+  setup specs (so facility/patient/encounter meta exist and care_fe's real UI helpers work), and
+  restore+apply this PR's stored backend-prerequisite seed. Feature data is built two ways: the
+  transactional flow (service requests, diagnostic reports, …) is DRIVEN through care_fe's own
+  Playwright helpers, while backend prerequisites the UI can't create (e.g. an ActivityDefinition
+  configured with multiple diagnostic_report_codes) are seeded ONCE via a validated
+  `care_fixture_context()` script (real DRF viewsets, never raw ORM), stored in a durable
+  `<!-- qa-seed-script -->` PR comment, and REPLAYED deterministically on every later run and on any
+  PR (the seed lives in a comment, not on the branch, so forks/random PRs work too). The agent then
+  authenticates via the provided storageState, drives the feature, and captures durable
+  desktop+mobile screenshots which it publishes with upload-asset. Durable screenshots are a
   HARD GATE: with no verified screenshot the PR can never reach state:ready. A clean pass advances to
   state:ready; an observed UI defect advances to state:rework (with findings the fixer can act on); an
   infrastructure failure or a data state that could not be constructed — neither the PR's fault —
@@ -340,21 +344,34 @@ steps:
           '{cookies: [], origins: [{origin: "http://host.docker.internal", localStorage: [{name: "care_access_token", value: $a}, {name: "care_refresh_token", value: $r}]}]}' \
           > tests/.auth/user.json
       fi
-      # 2. Self-contained Playwright config: baseURL = sandbox origin; NO webServer, NO globalSetup,
-      #    NO setup project (those are the repo default's, and they break here). desktop + mobile
-      #    projects reuse the storageState above. The agent runs its spec with:
+      # 2. Self-contained Playwright config: baseURL = sandbox origin; NO webServer and NO care_fe
+      #    globalSetup (those come from the repo default and break here — SSL token refresh + a
+      #    preview server on :4000 that clashes with our running one). It DOES define its own
+      #    fresh-login globalSetup (above) and wires care_fe's OWN setup specs as dependency
+      #    projects (setup-facility → setup-patient) so getFacilityId()/getPatientId()/
+      #    getEncounterId() work and the agent can reuse care_fe's real helpers. The agent runs:
       #      CI=true npx playwright test --config tests/uiqa/qa.config.ts --project desktop --project mobile
+      #    (the desktop/mobile projects depend on the setup projects, which run automatically first).
       cat > tests/uiqa/qa.config.ts <<'EOF'
       import { defineConfig, devices } from '@playwright/test';
       export default defineConfig({
-        testDir: '.', fullyParallel: false, retries: 0,
+        // Config lives in tests/uiqa; testDir '..' = tests/ so care_fe's own setup
+        // specs (tests/setup/*.setup.ts) resolve for the setup projects below.
+        testDir: '..', fullyParallel: false, retries: 0, workers: 1,
         globalSetup: './qa.globalsetup.ts',
         reporter: [['json', { outputFile: '/tmp/gh-aw/agent/qa-results.json' }], ['list']],
         outputDir: '/tmp/gh-aw/agent/qa-artifacts',
         use: { baseURL: 'http://host.docker.internal', trace: 'off', storageState: 'tests/.auth/user.json' },
         projects: [
-          { name: 'desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1366, height: 768 } } },
-          { name: 'mobile',  use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
+          // Reuse care_fe's OWN setup specs (exactly as care_fe CI does) to mint the
+          // facility/patient/encounter meta that getFacilityId()/getPatientId()/
+          // getEncounterId() read — so the agent reuses care_fe's real UI helpers
+          // (e.g. createServiceRequest) instead of hand-rolling picker selectors.
+          // patient.setup depends on facility.setup for the facilityId.
+          { name: 'setup-facility', testMatch: /setup[\/\\]facility\.setup\.ts$/ },
+          { name: 'setup-patient',  testMatch: /setup[\/\\]patient\.setup\.ts$/, dependencies: ['setup-facility'] },
+          { name: 'desktop', testDir: '.', dependencies: ['setup-patient'], use: { ...devices['Desktop Chrome'], viewport: { width: 1366, height: 768 } } },
+          { name: 'mobile',  testDir: '.', dependencies: ['setup-patient'], use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
         ],
       });
       EOF
@@ -370,12 +387,13 @@ steps:
     run: |
       set -uo pipefail
       mkdir -p /tmp/gh-aw/agent
-      # The data recipe for this PR's feature is stored ONCE (validated) in a durable PR comment
-      # marked `<!-- qa-seed-script -->` (see the QA prompt). It lives in a COMMENT, not on the PR
-      # branch, so it works for forks and any PR and needs no push access. Here, pre-agent, we
-      # restore the latest such seed and apply it via the /__qa_seed bridge so the exact data state
-      # exists deterministically before the agent runs. First-ever run finds none — the agent then
-      # authors + validates + stores it, and every subsequent run replays it here.
+      # The backend PREREQUISITE for this PR's feature (config the product UI can't create, e.g. an
+      # ActivityDefinition with multiple diagnostic_report_codes) is stored ONCE (validated) in a
+      # durable PR comment marked `<!-- qa-seed-script -->` (see the QA prompt). It lives in a COMMENT,
+      # not on the PR branch, so it works for forks and any PR and needs no push access. Here,
+      # pre-agent, we restore the latest such seed and apply it via the /__qa_seed bridge so the
+      # prerequisite exists deterministically before the agent drives the UI flow. First-ever run
+      # finds none — the agent then authors + validates + stores it, and every later run replays it.
       echo "none" > /tmp/gh-aw/agent/seed-status.txt
       if [ "$(cat /tmp/gh-aw/agent/backend-status.txt 2>/dev/null)" != "up" ]; then
         echo "backend not up — skipping seed restore"; exit 0
@@ -408,7 +426,7 @@ steps:
           --data-binary @/tmp/gh-aw/agent/stored-seed.py || true
         if grep -q 'QA-SEED-EXIT: 0' /tmp/gh-aw/agent/seed-apply.log 2>/dev/null; then
           echo "applied" > /tmp/gh-aw/agent/seed-status.txt
-          echo "stored seed applied cleanly (agent should verify + screenshot, not re-author)"
+          echo "stored prerequisite applied cleanly (agent reuses these ids, then drives the UI flow)"
         else
           echo "failed" > /tmp/gh-aw/agent/seed-status.txt
           echo "::warning::stored seed did not apply cleanly; agent will re-author it"
@@ -605,116 +623,131 @@ ls tests/helper tests/support
 ```
 
 - `tests/helper/ui.ts` — `selectFromCommand`, `selectFromValueSet`, `selectFromRequirements`,
+  `selectFromDefinitionCategoryPicker(page, picker, { navigateCategories, search })`,
   `clickTabOrMenuItem(page, /service requests/i)`, `expectToast`, … Reusable, origin-agnostic
   helpers that encode the real interaction patterns. Reuse them; never reinvent selectors.
-- Existing feature specs under `tests/**` (Step 3b) show the exact create flow for each entity.
+- Existing feature specs and page objects under `tests/**` show the exact create flow for each
+  entity — e.g. `tests/facility/patient/encounter/serviceRequests/serviceRequest.ts` exports
+  `createServiceRequest(page, facilityId, patientId, encounterId, allFields?, overrides?)` which
+  drives the whole "create service request" flow (including the category picker that hand-rolled
+  specs keep timing out on). **Prefer importing and calling these over writing your own selectors.**
 
-Reach a facility/patient/encounter by **navigating the baseline UI** — the baseline fixtures include
-a facility named "Facility with Patient" with patients and encounters, exactly what a user clicks
-through. (Do not rely on `getFacilityId()`/`*Meta.json` — those come from the setup project you are
-not running.)
+**The facility/patient/encounter are provided for you.** This config wires care_fe's own
+`tests/setup/facility.setup.ts` + `patient.setup.ts` as dependency projects, so they run
+automatically before your spec and write `tests/.auth/{facility,patient,encounter}Meta.json`
+(a facility named "Facility with Patient" from the baseline fixtures, plus a writable
+planned/in_progress encounter and its patient). In your spec, read them the standard way:
 
-## Step 3 — Ensure the feature's data exists (stored, deterministic seed)
+```ts
+import { getFacilityId } from "tests/support/facilityId";
+import { getPatientId } from "tests/support/patientId";
+import { getEncounterId } from "tests/support/encounterId";
+```
 
-The data your feature needs (e.g. a ServiceRequest whose ActivityDefinition has ≥2
-`diagnostic_report_codes`) is created by a **seed script that is authored ONCE, validated, and stored
-in a durable PR comment**, then **replayed deterministically** on every later run by the runner. This
-is the whole reliability model: the "how to load" is solved once and reused, not re-improvised each
-run. It works on **any PR** (the seed lives in a comment, never on the branch).
+These are the exact IDs care_fe's own helpers expect — do NOT navigate the baseline UI by hand to
+rediscover them.
 
-### 3a. Was the seed already applied this run?
+## Step 3 — Build the feature's data: DRIVE care_fe's real flows; seed only backend prerequisites
+
+Two kinds of data exist, and they are built two different ways. Getting this split right is the
+whole reliability model — past runs failed by trying to seed the *whole* graph over the API (guessing
+DRF payloads) or by hand-rolling the *transactional* UI flow (picker timeouts). Do neither.
+
+1. **Transactional / product entities** (ServiceRequest, DiagnosticReport, specimen collection, an
+   encounter's clinical data, …) — build these by **DRIVING care_fe's own UI flows in your spec,
+   reusing the helpers/page-objects** under `tests/**` (e.g. `createServiceRequest(...)`). care_fe's
+   helpers already encode the exact selectors and the multi-step picker navigation, so you never
+   guess an API body and never fight the category picker. This is the primary path.
+2. **Backend prerequisites / config** the product UI cannot create in-session (e.g. an
+   ActivityDefinition *configured with ≥2 `diagnostic_report_codes`*, a value set, a role) — seed
+   ONLY these through the `/__qa_seed` bridge, and store the seed so it **replays deterministically**
+   on every later run and on any PR (the seed lives in a PR comment, never on the branch).
+
+### 3a. Was a stored prerequisite seed already applied this run?
 
 ```bash
 cat /tmp/gh-aw/agent/seed-status.txt      # applied | failed | none
+grep '^QA-SEED' /tmp/gh-aw/agent/seed-apply.log 2>/dev/null   # ids the seed created/ensured
 ```
 
-- **`applied`** → the runner already restored a stored seed and built the data. **Do NOT author
-  anything.** Read the entity IDs it created and go straight to Step 4 (verify + screenshot):
+- **`applied`** → the runner already replayed this PR's stored prerequisite. Reuse the printed IDs;
+  do NOT re-author it. Go to 3c.
+- **`none`** (first run) or **`failed`** (stale/broken) → author + validate + store the prerequisite
+  now (3b), if your feature needs one.
 
-  ```bash
-  grep '^QA-SEED' /tmp/gh-aw/agent/seed-apply.log      # the external_ids to navigate to
-  ```
+### 3b. DECIDE the graph, then seed ONLY the backend prerequisite
 
-- **`none`** (first run for this PR) or **`failed`** (stored seed is stale/broken) → you must
-  **author, validate, and store** the seed now (3b–3e).
-
-### 3b. DECIDE the data graph
 List the changed files (`pull_requests` toolset or
-`git diff --name-only "$(git merge-base HEAD origin/HEAD)"...HEAD`), map them to the primary feature
-surface, and write down the exact graph it needs (org → facility → patient → encounter → the feature
-entity, with the specific fields the feature keys on).
+`git diff --name-only "$(git merge-base HEAD origin/HEAD)"...HEAD`) and map them to the feature
+surface. Decide which entities are transactional (build via UI in 3c) and which are backend
+prerequisites (seed here).
 
-### 3c. AUTHOR the seed — a `care_fixture_context()` script that uses the REAL create endpoints
-Write the seed with the `write` tool to `/tmp/gh-aw/agent/qa-seed.py`. It MUST:
-- open `care_fixture_context()` (gives a superuser-authenticated DRF client that hits the **real
-  viewsets**, so everything is validated and committed on success);
-- build the graph with `base.create_*` helpers where they exist, and for entities that have **no
-  helper** (e.g. ServiceRequest, DiagnosticReport) call the real create endpoint directly with
-  `base.post(reverse("<viewset>-list", kwargs=...), data)` — **NEVER raw ORM** (`Model.objects...`
-  bypasses validation and fails);
-- be **idempotent** (look up before create) so replay is safe;
-- `print("QA-SEED <label> <external_id>")` for each key entity so both you and future runs can
-  navigate to them.
-
-Discover the exact endpoints/fields from care_fe's typed routes and the backend serializers — e.g.
-the ServiceRequest create route is `POST /api/v1/facility/{facilityId}/service_request/`
-(`src/types/emr/serviceRequest/serviceRequestApi.ts` → `createServiceRequest`; body =
-`ServiceRequestCreateSpec`). Read them first:
+If a backend prerequisite is needed, write a **small, idempotent** `care_fixture_context()` script to
+`/tmp/gh-aw/agent/qa-seed.py` that creates/patches **only that prerequisite** — not the whole graph,
+and never the transactional entities you can drive in the UI. It MUST use `base.create_*` /
+`base.post(reverse("<viewset>-list", kwargs=...), data)` against the **real viewsets** (NEVER raw ORM
+`Model.objects...`, which bypasses validation), look up before create (idempotent), and
+`print("QA-SEED <label> <external_id>")` for each entity. For ENG-503 the prerequisite is an
+ActivityDefinition whose `diagnostic_report_codes` has two entries — attach it to the baseline
+facility so the setup encounter can order it:
 
 ```bash
-grep -n "def create_" care/care/fixtures/base.py
-sed -n '1,60p' src/types/emr/serviceRequest/serviceRequestApi.ts
-grep -rn "reverse(" care/care/fixtures/base.py | head
+grep -n "def create_activity_definition\|def create_" care/care/fixtures/base.py | head
 ```
-
-Sketch (adapt — read base.py for exact required args):
 
 ```python
-# /tmp/gh-aw/agent/qa-seed.py
-from django.urls import reverse
+# /tmp/gh-aw/agent/qa-seed.py — prerequisite ONLY (an AD with 2 report codes on the baseline facility)
+from care.facility.models import Facility
 from care.fixtures.context import care_fixture_context
 with care_fixture_context() as base:
-    org = base.create_organization(name="QA ENG-503 Org")
-    facility = base.create_facility(org.id, name="QA ENG-503 Facility")
-    patient = base.create_patient(org.id)
-    encounter = base.create_encounter(patient.id, facility.id)
-    ad = base.create_activity_definition(facility.id, title="QA Multi-Code Panel", code=...,
-        locations=[...], specimen_requirements=[...], observation_result_requirements=[...],
-        charge_item_definitions=[...], diagnostic_report_codes=[code_a, code_b])
-    sr = base.post(reverse("service_request-list", kwargs={"facility_external_id": facility.external_id}),
-                   {"encounter": encounter.external_id, "activity_definition": ad.slug, ...})
-    print("QA-SEED facility", facility.external_id)
-    print("QA-SEED patient", patient.external_id)
-    print("QA-SEED encounter", encounter.external_id)
-    print("QA-SEED service_request", sr.external_id)
+    facility = Facility.objects.get(name="Facility with Patient")   # baseline fixture facility
+    ad = base.create_activity_definition(facility.id, title="QA Multi-Report Panel",
+        diagnostic_report_codes=[code_a, code_b], ...)   # read base.py for required args
+    print("QA-SEED activity_definition", ad.slug)
 ```
 
-### 3d. VALIDATE the seed against the bridge (iterate on the API's errors)
+Validate it (iterate on the API's errors, **cap 5 attempts**):
 
 ```bash
 curl -s -X POST http://host.docker.internal/__qa_seed --data-binary @/tmp/gh-aw/agent/qa-seed.py
 ```
 
-The response ends `QA-SEED-EXIT: <n>`; it must be `0` AND print your `QA-SEED` id lines. On a non-zero
-exit, read the traceback — it names the wrong field/endpoint — fix the script and resubmit. **Cap: 5
-attempts.** The API's validation errors converge you (unlike opaque ORM errors). If you genuinely
-cannot construct it after 5 tries, escalate honestly (Step 7 `state:human`) with the exact errors.
+The response ends `QA-SEED-EXIT: <n>`; it must be `0` and print your `QA-SEED` lines. Then STORE it
+with `add-comment` so every later run replays it pre-agent — the comment body MUST contain, in order:
+(1) the literal marker `<!-- qa-seed-script -->`, (2) a short human sentence, (3) one fenced
+```python block whose contents are the **exact** validated `/tmp/gh-aw/agent/qa-seed.py`. Keep it
+idempotent; do not add other ```python fences to that comment.
 
-### 3e. STORE the validated seed so every future run replays it
+### 3c. BUILD the transactional flow in your spec by reusing care_fe's helpers
 
-Once the seed applied cleanly, emit it with `add-comment` so the runner can replay it pre-agent on
-every later run (a rework re-QA, a watchdog re-run, or a fresh `state:qa` on ANY PR gets the data
-deterministically without re-authoring). The comment body MUST contain, in order:
+In your spec (Step 4), use the setup-provided IDs and care_fe's own helpers — do not hand-roll the
+create flow. For ENG-503, that is: order the prerequisite ActivityDefinition as a ServiceRequest via
+`createServiceRequest`, then collect the specimen and create a DiagnosticReport **per code**:
 
-1. the literal marker line `<!-- qa-seed-script -->`
-2. a short human sentence
-3. a fenced code block tagged `python` whose contents are the **exact** validated
-   `/tmp/gh-aw/agent/qa-seed.py`.
+```ts
+import { createServiceRequest } from "tests/facility/patient/encounter/serviceRequests/serviceRequest";
+import { getFacilityId } from "tests/support/facilityId";
+import { getPatientId } from "tests/support/patientId";
+import { getEncounterId } from "tests/support/encounterId";
+// ...
+const sr = await createServiceRequest(page, getFacilityId(), getPatientId(), getEncounterId(),
+  false, { activityDefinition: "QA Multi-Report Panel" });   // reuse the seeded AD by title
+```
 
-The runner finds the freshest comment containing that marker, extracts the first ```python fenced
-block, and applies it. Keep the seed idempotent so replay never double-creates. Do not add other
-```python fences to that comment. Then continue to Step 4 to verify + screenshot using the IDs you
-printed.
+Read the matching create spec (`ServiceRequestCreate.spec.ts`, and any specimen/report specs) to see
+the exact follow-on flow, and reuse those helpers too. If a helper doesn't exist for a step, follow
+`tests/PLAYWRIGHT_GUIDE.md` and the closest existing spec's pattern — never invent raw selectors when
+a helper exists.
+
+### 3d. KNOWN care_fe gotcha — empty reports/cards render NOTHING
+
+Several review surfaces short-circuit to `null` when their entity has no data. In particular
+`DiagnosticReportReview` renders a card for a report **only if** that report has at least one
+observation, attached file, or **conclusion**. So a scenario that creates *empty* reports proves
+nothing — the "Test Results" section renders empty. To make the multi-report outcome actually
+render, **enter a conclusion (and/or an observation value) on each report before finalizing it**,
+then assert both cards are present and screenshot them full-page (Step 4). The general principle:
+drive the feature into the state where its UI actually renders, then prove that state.
 
 ## Step 4 — Exercise and capture before/after screenshots (desktop AND mobile — both mandatory)
 
@@ -734,23 +767,28 @@ cat /tmp/gh-aw/agent/pw-runner-status.txt   # "ready" -> use this path; "unavail
 ```
 
 Write your focused spec at `tests/uiqa/<KEY>.spec.ts`. It runs under `qa.config.ts`, so it is
-**already logged in** (no token code) and baseURL is the sandbox origin. **Reuse care_fe's helpers and
-the create-flow you found in Step 3b** to build the PR-specific data through the real UI, then
-`expect(...)` the changed element and screenshot full-page. Skeleton (adapt; import the helpers your
-flow uses):
+**already logged in** (no token code), baseURL is the sandbox origin, and care_fe's setup specs have
+already written the facility/patient/encounter meta. **Reuse care_fe's helpers and the create-flow you
+found in Step 3c** to build the PR-specific data through the real UI, then `expect(...)` the changed
+element and screenshot full-page. Skeleton (adapt; import the helpers your flow uses):
 
 ```ts
 import { test, expect } from '@playwright/test';
-// import { selectFromValueSet, expectToast, clickTabOrMenuItem } from 'tests/helper/ui'; // reuse
+import { getFacilityId } from 'tests/support/facilityId';
+import { getPatientId } from 'tests/support/patientId';
+import { getEncounterId } from 'tests/support/encounterId';
+// import { createServiceRequest } from 'tests/facility/patient/encounter/serviceRequests/serviceRequest';
 test('changed feature renders', async ({ page }, testInfo) => {
-  // 1. Navigate the baseline UI to a facility/patient/encounter ("Facility with Patient" fixture).
-  // 2. CREATE the feature's data THROUGH THE UI, reusing the create flow from the spec you found in
-  //    3b (e.g. ServiceRequestCreate.spec.ts): open the create page, fill with the care_fe helpers,
-  //    submit, assert the success toast. (Any pure backend-config prerequisite — e.g. a multi-code
-  //    ActivityDefinition — you already built via the seed bridge in Step 3d.)
-  // 3. Navigate to the changed surface and ASSERT the specific outcome the PR adds:
-  await page.goto('/<changed-route>');
-  await expect(page.getByText('<the new label / Nth row / count>')).toBeVisible(); // the real gate
+  // 1. Use the setup-provided IDs (do NOT re-navigate the baseline UI to find them):
+  const facilityId = getFacilityId(), patientId = getPatientId(), encounterId = getEncounterId();
+  // 2. BUILD the feature's data THROUGH THE UI by reusing care_fe's helper/create-flow from Step 3c
+  //    (e.g. createServiceRequest(page, facilityId, patientId, encounterId, false, { activityDefinition }))
+  //    then drive the follow-on steps (specimen, a DiagnosticReport per code, a conclusion on each).
+  //    (Any pure backend-config prerequisite — e.g. a multi-code ActivityDefinition — you already
+  //    built via the seed bridge in Step 3b.)
+  // 3. Navigate to the changed surface and ASSERT the specific outcome the PR adds (assert BEFORE the
+  //    shot — you may have no vision model), e.g. exactly N rendered cards:
+  await expect(page.locator('[data-slot="collapsible"]')).toHaveCount(2); // the real gate
   await page.screenshot({ path: `/tmp/gh-aw/agent/feature-${testInfo.project.name}.png`, fullPage: true });
 });
 ```
