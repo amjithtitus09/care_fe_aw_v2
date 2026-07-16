@@ -303,18 +303,41 @@ steps:
       # never has to run care_fe's setup project (whose webServer/globalSetup clash with the running
       # preview) or hand-roll auth. The agent then ONLY writes its focused feature spec and runs it.
       mkdir -p tests/uiqa tests/.auth /tmp/gh-aw/agent
-      # 1. Auth storageState: inject the fixture token into localStorage for the SANDBOX origin
-      #    (http://host.docker.internal — the only origin the agent's browser can reach). Playwright
-      #    loads this via `storageState` so the spec is already signed in. Built with jq (robust).
+      # 1. Fresh-auth globalSetup: the runner mints a token at boot, but the agent runs its spec
+      #    ~15+ min later by which point care's short-lived access JWT has EXPIRED — so a
+      #    pre-baked token in storageState makes the app redirect to login. Instead, write a
+      #    Playwright globalSetup that logs in via the API AT SPEC-RUN TIME and writes a fresh
+      #    storageState. This runs inside the agent sandbox against the sandbox origin.
+      cat > tests/uiqa/qa.globalsetup.ts <<'EOF'
+      import { request } from '@playwright/test';
+      import * as fs from 'fs';
+      export default async function globalSetup() {
+        const ctx = await request.newContext({ baseURL: 'http://host.docker.internal' });
+        const res = await ctx.post('/api/v1/auth/login/', {
+          data: { username: 'admin', password: 'admin' },
+        });
+        if (!res.ok()) throw new Error(`QA login failed: HTTP ${res.status()}`);
+        const { access, refresh } = await res.json();
+        const state = { cookies: [], origins: [{
+          origin: 'http://host.docker.internal',
+          localStorage: [
+            { name: 'care_access_token', value: access },
+            { name: 'care_refresh_token', value: refresh },
+          ],
+        }]};
+        fs.mkdirSync('tests/.auth', { recursive: true });
+        fs.writeFileSync('tests/.auth/user.json', JSON.stringify(state));
+        await ctx.dispose();
+      }
+      EOF
+      # Also seed an initial (possibly-stale) storageState so the file always exists; globalSetup
+      # overwrites it with fresh tokens at run time.
       if [ -f /tmp/gh-aw/agent/auth.json ]; then
         ACCESS="$(jq -r '.access // ""' /tmp/gh-aw/agent/auth.json)"
         REFRESH="$(jq -r '.refresh // ""' /tmp/gh-aw/agent/auth.json)"
         jq -n --arg a "$ACCESS" --arg r "$REFRESH" \
           '{cookies: [], origins: [{origin: "http://host.docker.internal", localStorage: [{name: "care_access_token", value: $a}, {name: "care_refresh_token", value: $r}]}]}' \
           > tests/.auth/user.json
-        echo "wrote tests/.auth/user.json storageState (token present: $([ -n "$ACCESS" ] && echo yes || echo no))"
-      else
-        echo "::warning::no auth.json — agent will have no pre-provisioned auth"
       fi
       # 2. Self-contained Playwright config: baseURL = sandbox origin; NO webServer, NO globalSetup,
       #    NO setup project (those are the repo default's, and they break here). desktop + mobile
@@ -324,6 +347,7 @@ steps:
       import { defineConfig, devices } from '@playwright/test';
       export default defineConfig({
         testDir: '.', fullyParallel: false, retries: 0,
+        globalSetup: './qa.globalsetup.ts',
         reporter: [['json', { outputFile: '/tmp/gh-aw/agent/qa-results.json' }], ['list']],
         outputDir: '/tmp/gh-aw/agent/qa-artifacts',
         use: { baseURL: 'http://host.docker.internal', trace: 'off', storageState: 'tests/.auth/user.json' },
@@ -333,8 +357,8 @@ steps:
         ],
       });
       EOF
-      echo "provisioned tests/uiqa/qa.config.ts"
-      ls -la tests/.auth/user.json tests/uiqa/qa.config.ts 2>&1 || true
+      echo "provisioned tests/uiqa/qa.config.ts + qa.globalsetup.ts"
+      ls -la tests/.auth/user.json tests/uiqa/qa.config.ts tests/uiqa/qa.globalsetup.ts 2>&1 || true
 
 # Always tear the seeded backend down, even if the agent or build failed, so a crashed run
 # never leaves Docker services holding the runner.
@@ -496,7 +520,10 @@ care_fe's `setup` project, do NOT hand-roll auth, do NOT write a Playwright conf
 run that tried wasted its budget on `webServer`/`globalSetup` conflicts. Two files are ready:
 
 - `tests/.auth/user.json` — a Playwright `storageState` with a **valid signed-in `admin` session**
-  for the sandbox origin. Your spec is already logged in; you do not touch tokens.
+  for the sandbox origin. A `globalSetup` in the config logs in **fresh via the API at spec-run
+  time** and rewrites this file, so the session is never stale. Your spec is already logged in; you
+  do not touch tokens. (If you ever see a redirect to `/login`, do not re-implement auth — it means
+  the backend is down; escalate as infra.)
 - `tests/uiqa/qa.config.ts` — the correct config (baseURL `http://host.docker.internal`, no
   webServer/globalSetup/setup project, `desktop` + `mobile` projects reusing that storageState).
 
