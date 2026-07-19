@@ -215,6 +215,19 @@ export function DiagnosticReportForm({
     }
   }, [fullReport]);
 
+  // Preselect the report code when the form is scoped to a single code and no
+  // report exists yet, so the report can be created without an extra selection.
+  useEffect(() => {
+    const codes = activityDefinition?.diagnostic_report_codes;
+    if (!hasReport && !selectedReportCode && codes?.length === 1) {
+      setSelectedReportCode(codes[0]);
+    }
+  }, [
+    hasReport,
+    selectedReportCode,
+    activityDefinition?.diagnostic_report_codes,
+  ]);
+
   // Upserting observations for a diagnostic report
   const { mutate: upsertObservations, isPending: isUpsertingObservations } =
     useMutation({

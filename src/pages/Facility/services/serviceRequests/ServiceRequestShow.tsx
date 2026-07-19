@@ -596,19 +596,51 @@ export default function ServiceRequestShow({
                 </DropdownMenu>
               </div>
             )}
-            {(!diagnosticReports.length ||
-              diagnosticReports[0]?.status !==
-                DiagnosticReportStatus.final) && (
-              <DiagnosticReportForm
-                patientId={request.encounter.patient.id}
-                facilityId={facilityId}
-                serviceRequestId={serviceRequestId}
-                observationDefinitions={observationRequirements}
-                diagnosticReports={diagnosticReports}
-                activityDefinition={activityDefinition}
-                specimens={request.specimens || []}
-                disableEdit={disableEdit}
-              />
+            {activityDefinition.diagnostic_report_codes &&
+            activityDefinition.diagnostic_report_codes.length > 0 ? (
+              // Render a dedicated report form per diagnostic report code so
+              // that a separate diagnostic report can be created for each code.
+              activityDefinition.diagnostic_report_codes.map((reportCode) => {
+                const codeReports = diagnosticReports.filter(
+                  (report) => report.code?.code === reportCode.code,
+                );
+                if (
+                  codeReports[0]?.status === DiagnosticReportStatus.final
+                ) {
+                  return null;
+                }
+                return (
+                  <DiagnosticReportForm
+                    key={reportCode.code}
+                    patientId={request.encounter.patient.id}
+                    facilityId={facilityId}
+                    serviceRequestId={serviceRequestId}
+                    observationDefinitions={observationRequirements}
+                    diagnosticReports={codeReports}
+                    activityDefinition={{
+                      ...activityDefinition,
+                      diagnostic_report_codes: [reportCode],
+                    }}
+                    specimens={request.specimens || []}
+                    disableEdit={disableEdit}
+                  />
+                );
+              })
+            ) : (
+              (!diagnosticReports.length ||
+                diagnosticReports[0]?.status !==
+                  DiagnosticReportStatus.final) && (
+                <DiagnosticReportForm
+                  patientId={request.encounter.patient.id}
+                  facilityId={facilityId}
+                  serviceRequestId={serviceRequestId}
+                  observationDefinitions={observationRequirements}
+                  diagnosticReports={diagnosticReports}
+                  activityDefinition={activityDefinition}
+                  specimens={request.specimens || []}
+                  disableEdit={disableEdit}
+                />
+              )
             )}
           </div>
 
