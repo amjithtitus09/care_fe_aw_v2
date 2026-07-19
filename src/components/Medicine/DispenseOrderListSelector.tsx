@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
+import PaginationComponent from "@/components/Common/Pagination";
 import { CardListSkeleton } from "@/components/Common/SkeletonLoading";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -26,6 +27,8 @@ interface DispenseOrderListSelectorProps {
   onSelectDispenseOrder: (dispenseOrder: DispenseOrderRead | undefined) => void;
 }
 
+const DISPENSE_ORDERS_PER_PAGE = 15;
+
 export default function DispenseOrderListSelector({
   patientId,
   facilityId,
@@ -34,12 +37,15 @@ export default function DispenseOrderListSelector({
 }: DispenseOrderListSelectorProps) {
   const { t } = useTranslation();
   const [openDrawer, setOpenDrawer] = React.useState(false);
+  const [page, setPage] = React.useState(1);
   const { data: dispenseOrders, isLoading } = useQuery({
-    queryKey: ["dispenseOrders", patientId, facilityId],
+    queryKey: ["dispenseOrders", patientId, facilityId, page],
     queryFn: query(dispenseOrderApi.list, {
       pathParams: { facilityId: facilityId ?? "" },
       queryParams: {
         patient: patientId,
+        limit: DISPENSE_ORDERS_PER_PAGE,
+        offset: (page - 1) * DISPENSE_ORDERS_PER_PAGE,
       },
     }),
     enabled: !!patientId && !!facilityId,
@@ -89,6 +95,12 @@ export default function DispenseOrderListSelector({
           selectedDispenseOrderId={selectedDispenseOrderId}
           onSelectDispenseOrder={onSelectDispenseOrder}
         />
+        <PaginationComponent
+          cPage={page}
+          defaultPerPage={DISPENSE_ORDERS_PER_PAGE}
+          data={{ totalCount: dispenseOrders.count }}
+          onChange={(newPage) => setPage(newPage)}
+        />
       </div>
       <div className="lg:hidden">
         <Drawer open={openDrawer} onOpenChange={setOpenDrawer}>
@@ -131,6 +143,12 @@ export default function DispenseOrderListSelector({
                 dispenseOrders={dispenseOrders.results as DispenseOrderRead[]}
                 selectedDispenseOrderId={selectedDispenseOrderId}
                 onSelectDispenseOrder={handleSelectDispenseOrder}
+              />
+              <PaginationComponent
+                cPage={page}
+                defaultPerPage={DISPENSE_ORDERS_PER_PAGE}
+                data={{ totalCount: dispenseOrders.count }}
+                onChange={(newPage) => setPage(newPage)}
               />
             </div>
           </DrawerContent>
