@@ -643,7 +643,29 @@ export default function ServiceRequestShow({
             )}
           </div>
 
-          {diagnosticReports.length > 0 && (
+          {/* Render a dedicated review/approval flow per diagnostic report code
+              so each code's report can be reviewed and finalized independently,
+              even after an earlier code's report is already final. */}
+          {hasDiagnosticReportCodes ? (
+            diagnosticReportCodes.map((reportCode) => {
+              const codeReports = diagnosticReports.filter(
+                (report) => report.code?.code === reportCode.code,
+              );
+              if (codeReports.length === 0) {
+                return null;
+              }
+              return (
+                <DiagnosticReportReview
+                  key={reportCode.code}
+                  facilityId={facilityId}
+                  patientId={request.encounter.patient.id}
+                  serviceRequestId={serviceRequestId}
+                  diagnosticReports={codeReports}
+                  disableEdit={disableEdit}
+                />
+              );
+            })
+          ) : diagnosticReports.length > 0 ? (
             <DiagnosticReportReview
               facilityId={facilityId}
               patientId={request.encounter.patient.id}
@@ -651,7 +673,7 @@ export default function ServiceRequestShow({
               diagnosticReports={diagnosticReports}
               disableEdit={disableEdit}
             />
-          )}
+          ) : null}
         </div>
       </div>
       {!isMobile && (
