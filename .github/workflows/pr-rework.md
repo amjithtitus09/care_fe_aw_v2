@@ -100,23 +100,25 @@ safe-outputs:
 imports:
   - shared/jira-report.md
 
-# Pre-agent host steps: give the AGENT container a working node + installed deps so it can actually
-# run `npm run format` (prettier). Without this the agent's sandbox has no usable npm — the ONLY
-# reliable way to satisfy the CI `prettier/prettier` rule — so it falls back to hand-editing prettier
-# layout, which never converges and burns the whole rework-attempt budget (this caused a real
-# `state:human` escalation on a PR whose functional fix was already correct). Mirrors the same block
-# in jira-pr-author.md. node_modules is gitignored, so it never enters the push-to-branch patch.
+# Pre-agent host step: install deps so `node_modules` exists AND the repo's husky git pre-commit
+# hook is set up (via the `prepare: husky` script npm ci runs). This is what makes formatting work:
+# the agent CANNOT invoke `npm run format` directly (the sandbox denies it), but when it commits its
+# fix, git runs the husky + lint-staged pre-commit hook as a subprocess, which runs prettier +
+# eslint --fix on the staged files — byte-identical to what CI wants. Without this step the hook is
+# absent, the commit isn't formatted, and prettier/prettier fails in CI (this caused a real
+# `state:human` escalation on a PR whose functional fix was already correct). Mirrors jira-pr-author.
+# node_modules is gitignored, so it never enters the push-to-branch patch.
 steps:
   - name: Ensure full working tree
     run: git sparse-checkout disable 2>/dev/null || true
-  - name: Install dependencies (so the agent can run the formatter)
+  - name: Install dependencies (node_modules + husky pre-commit hook, so commits auto-format)
     # Best-effort: a transient install failure must not hard-block the rework (the agent can still
-    # fix non-formatting defects); but in the normal case this makes `npm run format` actually work.
+    # fix the defect); but in the normal case this installs the pre-commit hook that formats commits.
     continue-on-error: true
     run: |
       set -uo pipefail
       npm ci --prefer-offline --no-audit --no-fund || npm install --no-audit --no-fund || \
-        echo "::warning::dependency install failed; the agent must NOT hand-edit prettier — escalate instead"
+        echo "::warning::dependency install failed; pre-commit formatting hook may be unavailable"
 ---
 
 # care_fe PR Rework — `state:rework`
@@ -186,17 +188,14 @@ a new human request always gets a full fresh 3-attempt budget.
 ## Step 2 — Set up
 
 The PR branch is already checked out **and dependencies are pre-installed** by the workflow (a
-host-side `npm ci` ran before you started), so `node_modules` already exists and `npm run format`,
-`npm run lint-fix`, `npm run knip`, and `npm run build` are ready to run. If for some reason a command
-reports missing dependencies, install them once:
+host-side `npm ci` ran before you started, which also installed the repo's **git pre-commit hook**
+via husky). This matters for formatting: see Step 4 and Step 5.
 
-```bash
-npm ci --prefer-offline
-```
-
-If `npm`/`node` is genuinely unavailable in this environment (a command like `npm run format` errors
-with "command not found" / a missing runtime), do **not** try to work around it by hand — see the
-formatting rule in Step 4 and escalate rather than burning attempts.
+**You generally cannot run the build tools (`npm run format`, `npm run lint-fix`, `npm run knip`,
+`npm run build`, `npx tsc`) directly** — this agent sandbox denies invoking them, and that is
+expected, not an error to work around. Real validation (eslint, prettier, knip, build, tsc) runs
+**downstream in CI** after you push, and the review stage checks that CI before advancing. Do **not**
+try to hand-substitute for a tool you cannot run.
 
 ## Step 3 — Implement a minimal fix
 
@@ -211,41 +210,38 @@ first — remove the genuinely-unused export/file/dep the PR introduced. Only wh
 intentionally kept (e.g. a public API surface used elsewhere later) add a **minimal, specific**
 ignore entry to `knip.json`. Never blanket-ignore to silence unrelated pre-existing findings.
 
-## Step 4 — Validate locally
+## Step 4 — How formatting works here (the pre-commit hook does it — never hand-edit)
 
-Run the repo's checks and make sure they pass before pushing — **run the formatter first**:
+You do **not** run the formatter yourself. When you commit in Step 5, the repo's **husky +
+lint-staged pre-commit hook** automatically runs `prettier --write` (with the repo's plugins) and
+`eslint --fix` on your **staged** files, then re-stages the formatted result. So the way to satisfy
+the CI `prettier/prettier` rule is simply to **stage your changed files and commit them normally** —
+the hook formats them for you, byte-identically to what CI wants. (This is the same mechanism the
+author stage relies on; git runs the hook as a subprocess, so it works even though invoking
+`npm run format` directly is denied in this sandbox.)
 
-```bash
-npm run format     # prettier --write on ./src ./tests — ALWAYS run this; never hand-format
-npm run lint-fix
-npm run knip
-npm run build
-```
+**Never** try to match prettier by hand-editing whitespace, indentation, line-wrapping, or by moving
+code around — prettier's layout (e.g. the multi-line-ternary hang-indent) will not converge by hand,
+and hand-edits only waste attempts. If you believe a change is purely a formatting fix with no code to
+stage (nothing for the hook to reformat), do **not** hand-edit: escalate to `state:human` noting
+"formatting-only change; run `npm run format` locally" so a person applies the formatter.
 
-**Formatting / `prettier/prettier` failures: run the formatter, never hand-edit.** The CI "Lint Code
-Base" check enforces prettier via eslint's `prettier/prettier` rule. The ONLY correct way to satisfy
-it is to run `npm run format` (its output is byte-identical to what the rule wants — same config +
-plugins) and commit the result. **Never** try to match prettier by hand-editing whitespace,
-indentation, line-wrapping, or by moving code around — prettier's layout (e.g. the multi-line-ternary
-hang-indent) will not converge by hand, and hand-edits burn attempts without fixing the check. If
-`npm run format` changes files, that IS the fix.
-
-**If `npm run format` cannot run at all** (missing node/npm, install failed), a `prettier/prettier`
-failure is **not** hand-fixable — do not attempt it. Make only the functional code fix, then if
-prettier is the only remaining failure, **escalate to `state:human`** naming "formatter unavailable in
-the rework environment" as the blocker, rather than hand-editing whitespace and exhausting the cap.
-
-`npm run knip` must be clean (it is part of the "Lint Code Base" CI check alongside eslint). Run
-`npx tsc --noEmit` if the defect was type-related. If a fix introduces new problems you cannot
-resolve cleanly, prefer escalation (`state:human`) over a hacky workaround.
+**knip / eslint / build / type errors** are validated in CI, not here. If the reported defect is a
+knip failure, fix it at the source (remove the genuinely-unused export/file/dep the PR introduced);
+only add a **minimal, specific** `knip.json` ignore when the item is intentionally kept. Make the
+smallest correct code change; CI (re-checked by the review stage) is the validation gate.
 
 ## Step 5 — Push, re-label, and report
 
 1. Increment the attempt counter in cache memory (write the new `{ "count": N }` to
    `/tmp/gh-aw/cache-memory/pr-${{ github.event.pull_request.number }}-attempts.json`) — only now,
    since you are about to push.
-2. Push your changes with the `push-to-pull-request-branch` safe output (it adds the `[skip-ci]`
-   suffix automatically).
+2. **Commit your fix locally so the pre-commit hook formats it**: `git add -A` your changed files,
+   then `git commit` with a clear message. The husky + lint-staged **pre-commit hook runs prettier +
+   eslint --fix on the staged files** during this commit, so the committed result is prettier-clean
+   without you invoking the formatter. (If the commit output shows the hook reformatted files, that
+   is expected and correct.) Then push with the `push-to-pull-request-branch` safe output (it captures
+   your committed changes and adds the `[skip-ci]` suffix automatically).
 3. Advance the pipeline: `remove_labels` the whole other state set and `add_labels`
    **`state:review`** so the PR is re-reviewed (and, on pass, re-QA'd) with your fix.
 4. Post one `add-comment` summarizing what was reported and what you changed, and reference the
