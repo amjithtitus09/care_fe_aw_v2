@@ -269,6 +269,9 @@ export default function ServiceRequestShow({
   const diagnosticReportCodes =
     activityDefinition.diagnostic_report_codes ?? [];
   const hasDiagnosticReportCodes = diagnosticReportCodes.length > 0;
+  const shouldShowSingleReportForm =
+    !diagnosticReports.length ||
+    diagnosticReports[0]?.status !== DiagnosticReportStatus.final;
 
   const assignedSpecimenIds = new Set<string>();
 
@@ -625,22 +628,18 @@ export default function ServiceRequestShow({
                   />
                 );
               })
-            ) : (
-              (!diagnosticReports.length ||
-                diagnosticReports[0]?.status !==
-                  DiagnosticReportStatus.final) && (
-                <DiagnosticReportForm
-                  patientId={request.encounter.patient.id}
-                  facilityId={facilityId}
-                  serviceRequestId={serviceRequestId}
-                  observationDefinitions={observationRequirements}
-                  diagnosticReports={diagnosticReports}
-                  activityDefinition={activityDefinition}
-                  specimens={request.specimens || []}
-                  disableEdit={disableEdit}
-                />
-              )
-            )}
+            ) : shouldShowSingleReportForm ? (
+              <DiagnosticReportForm
+                patientId={request.encounter.patient.id}
+                facilityId={facilityId}
+                serviceRequestId={serviceRequestId}
+                observationDefinitions={observationRequirements}
+                diagnosticReports={diagnosticReports}
+                activityDefinition={activityDefinition}
+                specimens={request.specimens || []}
+                disableEdit={disableEdit}
+              />
+            ) : null}
           </div>
 
           {/* Render a dedicated review/approval flow per diagnostic report code
