@@ -64,15 +64,15 @@ permissions: read-all
 
 engine:
   id: copilot
-  # Sonnet-4.5, deliberately (NOT opus like the review/qa/rework stages). This watcher fires per
-  # human comment — the most frequent agent in the pipeline — and triage is lighter work
-  # (classify a comment, read the touched diff, write a findings list) than QA's form-driving. On a
-  # live test, opus here hit the premium-tier inference 403 mid-run ("Authentication failed with
-  # provider (HTTP 403)") after a token-heavy PR read — the exact budget failure the other stages
-  # documented. Sonnet-4.5 runs in the STANDARD (non-premium) request tier, so a high-frequency
-  # watcher never exhausts the premium/AI-credit budget, and its agentic tool-use is more than enough
-  # to classify feedback and route it. Deep code-editing still happens in the opus-pinned rework fixer.
-  model: claude-sonnet-4.5
+  # Opus-4.8, consistent with the other stages (review/qa/rework). Triage is a judgement call —
+  # change-request vs question vs noise, plus a crisp actionable findings list the fixer acts on —
+  # so decision quality matters. The deterministic `if:` gate above keeps opus cost bounded: the
+  # agent never even starts on a bot/self/machine comment or a non-enrolled PR, so it fires only on
+  # genuine human feedback. (NOTE: inference HTTP-403s seen while testing were an ACCOUNT-level
+  # Copilot-requests budget/auth issue on the shared COPILOT_GITHUB_TOKEN — they hit sonnet-4.5 and
+  # opus-4.8 identically, so they are not a model-tier problem; if they recur, refresh/raise the
+  # token budget rather than downgrading the model.)
+  model: claude-opus-4.8
 
 max-turns: 20
 
