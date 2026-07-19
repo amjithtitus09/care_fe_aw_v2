@@ -266,6 +266,12 @@ export default function ServiceRequestShow({
   const observationRequirements =
     activityDefinition.observation_result_requirements ?? [];
   const diagnosticReports = request.diagnostic_reports || [];
+  const diagnosticReportCodes =
+    activityDefinition.diagnostic_report_codes ?? [];
+  const hasDiagnosticReportCodes = diagnosticReportCodes.length > 0;
+  const shouldShowSingleReportForm =
+    !diagnosticReports.length ||
+    diagnosticReports[0]?.status !== DiagnosticReportStatus.final;
 
   const assignedSpecimenIds = new Set<string>();
 
@@ -596,9 +602,33 @@ export default function ServiceRequestShow({
                 </DropdownMenu>
               </div>
             )}
-            {(!diagnosticReports.length ||
-              diagnosticReports[0]?.status !==
-                DiagnosticReportStatus.final) && (
+            {/* Render a dedicated report form per diagnostic report code so a separate diagnostic report can be created for each code. */}
+            {hasDiagnosticReportCodes ? (
+              diagnosticReportCodes.map((reportCode) => {
+                const codeReports = diagnosticReports.filter(
+                  (report) => report.code?.code === reportCode.code,
+                );
+                if (codeReports[0]?.status === DiagnosticReportStatus.final) {
+                  return null;
+                }
+                return (
+                  <DiagnosticReportForm
+                    key={reportCode.code}
+                    patientId={request.encounter.patient.id}
+                    facilityId={facilityId}
+                    serviceRequestId={serviceRequestId}
+                    observationDefinitions={observationRequirements}
+                    diagnosticReports={codeReports}
+                    activityDefinition={{
+                      ...activityDefinition,
+                      diagnostic_report_codes: [reportCode],
+                    }}
+                    specimens={request.specimens || []}
+                    disableEdit={disableEdit}
+                  />
+                );
+              })
+            ) : shouldShowSingleReportForm ? (
               <DiagnosticReportForm
                 patientId={request.encounter.patient.id}
                 facilityId={facilityId}
@@ -609,10 +639,32 @@ export default function ServiceRequestShow({
                 specimens={request.specimens || []}
                 disableEdit={disableEdit}
               />
-            )}
+            ) : null}
           </div>
 
-          {diagnosticReports.length > 0 && (
+          {/* Render a dedicated review/approval flow per diagnostic report code
+              so each code's report can be reviewed and finalized independently,
+              even after an earlier code's report is already final. */}
+          {hasDiagnosticReportCodes ? (
+            diagnosticReportCodes.map((reportCode) => {
+              const codeReports = diagnosticReports.filter(
+                (report) => report.code?.code === reportCode.code,
+              );
+              if (codeReports.length === 0) {
+                return null;
+              }
+              return (
+                <DiagnosticReportReview
+                  key={reportCode.code}
+                  facilityId={facilityId}
+                  patientId={request.encounter.patient.id}
+                  serviceRequestId={serviceRequestId}
+                  diagnosticReports={codeReports}
+                  disableEdit={disableEdit}
+                />
+              );
+            })
+          ) : diagnosticReports.length > 0 ? (
             <DiagnosticReportReview
               facilityId={facilityId}
               patientId={request.encounter.patient.id}
@@ -620,7 +672,7 @@ export default function ServiceRequestShow({
               diagnosticReports={diagnosticReports}
               disableEdit={disableEdit}
             />
-          )}
+          ) : null}
         </div>
       </div>
       {!isMobile && (
