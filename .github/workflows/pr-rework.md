@@ -99,6 +99,24 @@ safe-outputs:
 
 imports:
   - shared/jira-report.md
+
+# Pre-agent host steps: give the AGENT container a working node + installed deps so it can actually
+# run `npm run format` (prettier). Without this the agent's sandbox has no usable npm — the ONLY
+# reliable way to satisfy the CI `prettier/prettier` rule — so it falls back to hand-editing prettier
+# layout, which never converges and burns the whole rework-attempt budget (this caused a real
+# `state:human` escalation on a PR whose functional fix was already correct). Mirrors the same block
+# in jira-pr-author.md. node_modules is gitignored, so it never enters the push-to-branch patch.
+steps:
+  - name: Ensure full working tree
+    run: git sparse-checkout disable 2>/dev/null || true
+  - name: Install dependencies (so the agent can run the formatter)
+    # Best-effort: a transient install failure must not hard-block the rework (the agent can still
+    # fix non-formatting defects); but in the normal case this makes `npm run format` actually work.
+    continue-on-error: true
+    run: |
+      set -uo pipefail
+      npm ci --prefer-offline --no-audit --no-fund || npm install --no-audit --no-fund || \
+        echo "::warning::dependency install failed; the agent must NOT hand-edit prettier — escalate instead"
 ---
 
 # care_fe PR Rework — `state:rework`
@@ -167,11 +185,18 @@ a new human request always gets a full fresh 3-attempt budget.
 
 ## Step 2 — Set up
 
-The PR branch is already checked out. Install dependencies:
+The PR branch is already checked out **and dependencies are pre-installed** by the workflow (a
+host-side `npm ci` ran before you started), so `node_modules` already exists and `npm run format`,
+`npm run lint-fix`, `npm run knip`, and `npm run build` are ready to run. If for some reason a command
+reports missing dependencies, install them once:
 
 ```bash
 npm ci --prefer-offline
 ```
+
+If `npm`/`node` is genuinely unavailable in this environment (a command like `npm run format` errors
+with "command not found" / a missing runtime), do **not** try to work around it by hand — see the
+formatting rule in Step 4 and escalate rather than burning attempts.
 
 ## Step 3 — Implement a minimal fix
 
@@ -204,6 +229,11 @@ plugins) and commit the result. **Never** try to match prettier by hand-editing 
 indentation, line-wrapping, or by moving code around — prettier's layout (e.g. the multi-line-ternary
 hang-indent) will not converge by hand, and hand-edits burn attempts without fixing the check. If
 `npm run format` changes files, that IS the fix.
+
+**If `npm run format` cannot run at all** (missing node/npm, install failed), a `prettier/prettier`
+failure is **not** hand-fixable — do not attempt it. Make only the functional code fix, then if
+prettier is the only remaining failure, **escalate to `state:human`** naming "formatter unavailable in
+the rework environment" as the blocker, rather than hand-editing whitespace and exhausting the cap.
 
 `npm run knip` must be clean (it is part of the "Lint Code Base" CI check alongside eslint). Run
 `npx tsc --noEmit` if the defect was type-related. If a fix introduces new problems you cannot
