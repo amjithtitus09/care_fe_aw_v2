@@ -266,6 +266,9 @@ export default function ServiceRequestShow({
   const observationRequirements =
     activityDefinition.observation_result_requirements ?? [];
   const diagnosticReports = request.diagnostic_reports || [];
+  const diagnosticReportCodes =
+    activityDefinition.diagnostic_report_codes ?? [];
+  const hasDiagnosticReportCodes = diagnosticReportCodes.length > 0;
 
   const assignedSpecimenIds = new Set<string>();
 
@@ -596,17 +599,14 @@ export default function ServiceRequestShow({
                 </DropdownMenu>
               </div>
             )}
-            {activityDefinition.diagnostic_report_codes &&
-            activityDefinition.diagnostic_report_codes.length > 0 ? (
+            {hasDiagnosticReportCodes ? (
               // Render a dedicated report form per diagnostic report code so
               // that a separate diagnostic report can be created for each code.
-              activityDefinition.diagnostic_report_codes.map((reportCode) => {
+              diagnosticReportCodes.map((reportCode) => {
                 const codeReports = diagnosticReports.filter(
                   (report) => report.code?.code === reportCode.code,
                 );
-                if (
-                  codeReports[0]?.status === DiagnosticReportStatus.final
-                ) {
+                if (codeReports[0]?.status === DiagnosticReportStatus.final) {
                   return null;
                 }
                 return (
