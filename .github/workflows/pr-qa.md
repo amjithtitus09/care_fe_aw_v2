@@ -402,6 +402,7 @@ post-steps:
 
 imports:
   - shared/jira-report.md
+  - shared/skills/playwright-qa.md
 ---
 
 # care_fe Visual QA (Playwright) — `state:qa`
@@ -582,6 +583,30 @@ import { getEncounterId } from "tests/support/encounterId";
 These are the exact IDs care_fe's own helpers expect — do NOT navigate the baseline UI by hand to
 rediscover them.
 
+## Step 2.5 — Reconstruct the requirement and plan the journeys (do this BEFORE building data)
+
+**Read the "CARE QA mindset" section imported at the end of this prompt and apply it — it is not
+optional.** It exists because real defects shipped through this stage when QA verified an *existence
+proxy* next to the diff (e.g. "the dropdown shows 2 options") instead of the user's actual journey and
+the ripple into the surrounding code.
+
+Before you touch data, list the changed files (`git diff --name-only
+"$(git merge-base HEAD origin/HEAD)"...HEAD`) and read the diff **and the surrounding component**, then
+write down (for yourself):
+
+1. **The full requirement** — not just the surface the diff renders. For a "create/approve N of X"
+   feature, the requirement is the **plural** journey end-to-end: create item 1 → finalize/approve it →
+   create item 2 → finalize/approve it → then *use* each (view/print/open/complete) **independently**.
+2. **The journeys to drive** — happy + the negative twin + the N>1 boundary. The single-item path is
+   necessary but never sufficient.
+3. **The ripple set (R2)** — grep the touched component for every *other* reference to the entity the
+   feature pluralized (e.g. `diagnostic_reports[0]`, `[0]?.`, a completion/enable gate, a nav/print/
+   "view"/history handler, a summary count). Each is a candidate defect at N>1 **even though it is not
+   in the diff**. You will verify these in Step 4.
+
+This plan drives Steps 3–5. If the diff implies a requirement it doesn't fully implement (renders N
+forms but a completion gate or "view" still assumes one), that gap **is** your finding.
+
 ## Step 3 — Build the feature's data through care_fe's own UI (dynamically, for THIS ticket)
 
 You construct whatever data this specific PR needs — there is no pre-baked seed and no pre-written
@@ -633,16 +658,34 @@ await expect(page.getByText(/activity definition created successfully/i)).toBeVi
 **Verify the AD really has two codes** (both rows visible in the form before you submit, or re-open it)
 before moving on — a one-code AD silently degrades the feature to the single-report path.
 
-### 3c. DRIVE the transactional flow and ASSERT the feature
+### 3c. DRIVE the full journey and ASSERT the OUTCOME (not just the entry point)
 
 Order that AD via `createServiceRequest(page, getFacilityId(), getPatientId(), getEncounterId(), false,
 { activityDefinition: "<your AD title>" })` (found in the Lab Tests picker), open its detail via
 **"See Details"**, and **"Collect Specimen"** — reuse the exact flow in
 `ServiceRequestCreate.spec.ts` (it drives collect-specimen → "Select Diagnostic Report Type" →
-"Create Report" verbatim). The feature's direct proof: after specimen collection the **"Select
-Diagnostic Report Type"** dropdown renders **one option per `diagnostic_report_code`**
-(`DiagnosticReportForm.tsx` maps them to `SelectItem`s), so with two codes it shows **two** — assert
-`await expect(page.getByRole("option")).toHaveCount(2)` with the dropdown open, then screenshot.
+"Create Report" verbatim).
+
+**The dropdown count is a necessary-but-NOT-sufficient entry-point check, not the verdict.** After
+specimen collection the **"Select Diagnostic Report Type"** dropdown renders one option per
+`diagnostic_report_code` (`DiagnosticReportForm.tsx` maps them to `SelectItem`s), so with two codes it
+shows two — assert `await expect(page.getByRole("option")).toHaveCount(2)` with the dropdown open. That
+proves the *entry point* exists. **It does not prove the feature works — do not pass on it alone.**
+
+Now drive the **plural journey to its outcome** (Step 2.5 R1) and check the **ripple set** (R2):
+
+- Create the report for code 1 → enter a result/conclusion → **finalize/approve it**. Then create the
+  report for code 2 → enter a result/conclusion → **finalize/approve it**. Assert **both** reports are
+  present and independently reach their final state together (e.g. `toHaveCount(2)` on the rendered
+  review cards *after* both are finalized — see 3d).
+- Exercise every affordance in your ripple set at N>1: the **complete/approve** control on the service
+  request (is it still enabled/correct once BOTH reports are final — or does it key off only the
+  first?), and every **"view"/print/open/history** control (does it open the report you clicked, or
+  always the first?). Assert the OUTCOME of each — the right report opens, the SR is completable only
+  when all reports are final, etc.
+- If any of these is wrong at N>1 (a gate or a "view" pinned to the first report), that is a **defect**
+  → record it for the verdict (Step 5) with the exact control and expected-vs-actual. A green
+  `toHaveCount(2)` with a broken completion gate is a **fail**, not a pass.
 
 ### 3d. KNOWN care_fe gotcha — empty reports/cards render NOTHING
 
@@ -782,19 +825,30 @@ on a shot you have not visually confirmed.
 
 ## Step 5 — Assess
 
-Classify what you captured:
+Classify what you captured. **Your verdict must reflect the full journey (Step 2.5 R1) and the ripple
+set (R2) — not just that the entry point rendered.** A green entry-point proxy (e.g. the report-type
+dropdown showing 2 options) with an unverified or broken journey is **not** a pass.
 
 - 🔴 **Critical (defect → `state:rework`)** — the feature is visibly broken or caused a
   regression: a blank white page, an unhandled runtime error overlay, uncaught console errors
   traceable to the PR, globally broken layout on a page that should render, or — now that you
   are authenticated against a real backend — the PR's feature is missing, unreachable, or
   visibly wrong (e.g. an auth-gated feature route still shows the login screen *after* you
-  authenticated, indicating a real routing/render failure).
+  authenticated, indicating a real routing/render failure). **This also includes a journey or
+  ripple defect you found in Step 3c/4**: the plural (N>1) path can't be completed (e.g. the
+  second report can't be finalized/approved), a completion/enable gate keys off only the first
+  item, or a "view"/print/open control always targets the first item instead of the one chosen.
+  Report it with the exact route/component, control, and expected-vs-actual at N>1 so the fixer
+  can act.
 - 🟡 **Warning** — a noticeable but non-blocking layout/spacing/contrast issue, or non-fatal
   console warnings introduced by the PR. Warnings alone do **not** fail the PR.
 - 🟢 **Pass** — the **real changed feature UI** rendered correctly with a clean console and no
-  boot/render failure. (Because there is no `develop` baseline server here, judge each page on
-  its own merits rather than diffing pixel-for-pixel.)
+  boot/render failure, **AND** you drove the full plural journey to its outcome and checked every
+  other usage of the touched surface at N>1 (Step 3c). If you only reached the entry point and could
+  not drive the full journey, that is **not** a pass — it is either a defect (🔴, if a control was
+  wrong) or, only if genuinely infra/un-seedable, `state:human` naming the exact blocker.
+  (Because there is no `develop` baseline server here, judge each page on its own merits rather
+  than diffing pixel-for-pixel.)
 
 ## Step 6 — Publish screenshots (mandatory gate)
 

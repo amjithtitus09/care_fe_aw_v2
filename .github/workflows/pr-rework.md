@@ -188,13 +188,22 @@ ignore entry to `knip.json`. Never blanket-ignore to silence unrelated pre-exist
 
 ## Step 4 — Validate locally
 
-Run the repo's checks and make sure they pass before pushing:
+Run the repo's checks and make sure they pass before pushing — **run the formatter first**:
 
 ```bash
+npm run format     # prettier --write on ./src ./tests — ALWAYS run this; never hand-format
 npm run lint-fix
 npm run knip
 npm run build
 ```
+
+**Formatting / `prettier/prettier` failures: run the formatter, never hand-edit.** The CI "Lint Code
+Base" check enforces prettier via eslint's `prettier/prettier` rule. The ONLY correct way to satisfy
+it is to run `npm run format` (its output is byte-identical to what the rule wants — same config +
+plugins) and commit the result. **Never** try to match prettier by hand-editing whitespace,
+indentation, line-wrapping, or by moving code around — prettier's layout (e.g. the multi-line-ternary
+hang-indent) will not converge by hand, and hand-edits burn attempts without fixing the check. If
+`npm run format` changes files, that IS the fix.
 
 `npm run knip` must be clean (it is part of the "Lint Code Base" CI check alongside eslint). Run
 `npx tsc --noEmit` if the defect was type-related. If a fix introduces new problems you cannot
