@@ -160,6 +160,9 @@ steps:
         echo "Open PR #$pr already exists for jira/${key} — the agent will re-enter it at state:review instead of re-authoring."
         printf '%s' "$pr" > /tmp/gh-aw/agent/existing-pr.txt
       fi
+
+imports:
+  - shared/skills/care-author.md
 ---
 
 # Jira → Draft PR Author (pinned model)
@@ -213,7 +216,14 @@ description means the values in it.
 2. From the summary/description, identify the **smallest concrete code change** that satisfies the
    task. Locate the exact files involved (routes, components, pages, helpers) and read the
    surrounding code so your change is idiomatic.
-3. If the task is large, implement a **coherent first cut** a reviewer can build on — do not attempt
+3. **Map the ripple before you write code (mindset A1).** Read the "CARE authoring discipline" section
+   imported at the end of this prompt — it is not optional. If your task changes the **shape,
+   cardinality, or contract** of a shared surface (a data structure one → many, a component's props,
+   a hook's return, a util's behavior, a route's params, an enum/status), grep the codebase for
+   **every other usage** of that surface (`[0]`, `.find(`, single-item assumptions, a completion/enable
+   gate, a nav/"view"/history handler, a count) — those usages are part of your change's real scope,
+   even though the task text won't list them.
+4. If the task is large, implement a **coherent first cut** a reviewer can build on — do not attempt
    a sprawling change. One focused PR.
 
 ## Step 2 — Implement
@@ -221,6 +231,12 @@ description means the values in it.
 Edit only the application files needed (`src/**`, `tests/**`, `public/locale/en.json` for new
 strings). Keep the change surgical and consistent with the codebase. Do not refactor unrelated code,
 and do not touch workflow, CI, or configuration files.
+
+**Update every usage of a shared surface you change, not just the new path (mindset A2).** If you make
+something one → many, the gate must aggregate across **all** items (not read `[0]`), every
+"view"/"open"/history affordance must target the **right** item (never always the first), and any
+count/summary must reflect the real number. A `[0]`/single-item usage you leave behind on a surface
+you made plural is a defect — the review and QA stages will bounce the PR on exactly that.
 
 ## Step 3 — Format with prettier (the one build tool you run)
 
@@ -245,6 +261,10 @@ validated authoritatively downstream by CI and the review/QA stages before any h
 
 Also verify your change by reading, carefully:
 
+- **The ripple (mindset A3): for each shared surface you changed the shape/cardinality of, grep it
+  again in your final code and confirm no remaining usage still assumes the old shape** — a leftover
+  `[0]`/single-item gate, nav, "view"/history, or count on a surface you made plural is a defect you
+  would be shipping. Fix it now; this is the exact thing review and QA will check.
 - Every symbol, component, or import you use already exists and is imported (check the file's
   existing imports and the module you import from).
 - Any JSON you edit (e.g. `public/locale/en.json`) stays well-formed — correct commas and quoting,
