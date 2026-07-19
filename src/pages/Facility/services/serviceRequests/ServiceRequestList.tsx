@@ -58,7 +58,10 @@ import { dateQueryString, dateTimeQueryString } from "@/Utils/utils";
 function EmptyState() {
   const { t } = useTranslation();
   return (
-    <Card className="flex flex-col items-center justify-center p-8 text-center border-dashed">
+    <Card
+      data-testid="service-requests-empty"
+      className="flex flex-col items-center justify-center p-8 text-center border-dashed"
+    >
       <div className="rounded-full bg-primary/10 p-3 mb-4">
         <CareIcon icon="l-folder-open" className="size-6 text-primary" />
       </div>
