@@ -64,12 +64,15 @@ permissions: read-all
 
 engine:
   id: copilot
-  # Consistent with the other pipeline stages; the decision (change vs question vs noise, and a
-  # crisp actionable findings list) is exactly the reasoning/adherence work where opus is steadier.
-  # NOTE: this fires per human comment — the deterministic `if:` gate above keeps that cheap by
-  # never starting the agent on bot/self/machine comments. If cost is a concern, sonnet-4.5 is the
-  # cheaper fallback, or add a `@copilot`/`/address` mention-gate to only engage when addressed.
-  model: claude-opus-4.8
+  # Sonnet-4.5, deliberately (NOT opus like the review/qa/rework stages). This watcher fires per
+  # human comment — the most frequent agent in the pipeline — and triage is lighter work
+  # (classify a comment, read the touched diff, write a findings list) than QA's form-driving. On a
+  # live test, opus here hit the premium-tier inference 403 mid-run ("Authentication failed with
+  # provider (HTTP 403)") after a token-heavy PR read — the exact budget failure the other stages
+  # documented. Sonnet-4.5 runs in the STANDARD (non-premium) request tier, so a high-frequency
+  # watcher never exhausts the premium/AI-credit budget, and its agentic tool-use is more than enough
+  # to classify feedback and route it. Deep code-editing still happens in the opus-pinned rework fixer.
+  model: claude-sonnet-4.5
 
 max-turns: 20
 
