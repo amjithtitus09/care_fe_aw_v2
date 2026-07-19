@@ -6664,5 +6664,6 @@
   "your_request_order_list": "Your Request Order List",
   "zoom_in": "Zoom In",
   "zoom_out": "Zoom Out",
-  "℞": "℞"
+  "℞": "℞",
+  "view_observation_history_for_code": "View observation history for {{code}}"
 }

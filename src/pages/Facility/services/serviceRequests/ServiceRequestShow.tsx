@@ -32,6 +32,7 @@ import useBreakpoints from "@/hooks/useBreakpoints";
 import mutate from "@/Utils/request/mutate";
 import query from "@/Utils/request/query";
 import batchApi from "@/types/base/batch/batchApi";
+import { Code } from "@/types/base/code/code";
 import { ChargeItemServiceResource } from "@/types/billing/chargeItem/chargeItem";
 import activityDefinitionApi from "@/types/emr/activityDefinition/activityDefinitionApi";
 import { DiagnosticReportStatus } from "@/types/emr/diagnosticReport/diagnosticReport";
@@ -272,6 +273,11 @@ export default function ServiceRequestShow({
   const shouldShowSingleReportForm =
     !diagnosticReports.length ||
     diagnosticReports[0]?.status !== DiagnosticReportStatus.final;
+  const getReportsForCode = (code: string) =>
+    diagnosticReports.filter((report) => report.code?.code === code);
+  const isCodeReportFinal = (reportCode: Code) =>
+    getReportsForCode(reportCode.code)[0]?.status ===
+    DiagnosticReportStatus.final;
 
   const assignedSpecimenIds = new Set<string>();
 
@@ -328,8 +334,9 @@ export default function ServiceRequestShow({
     }
   };
 
-  const isFinal =
-    request?.diagnostic_reports?.[0]?.status === DiagnosticReportStatus.final;
+  const isFinal = hasDiagnosticReportCodes
+    ? diagnosticReportCodes.every(isCodeReportFinal)
+    : diagnosticReports[0]?.status === DiagnosticReportStatus.final;
 
   const canMarkAsComplete =
     isFinal ||
@@ -357,7 +364,7 @@ export default function ServiceRequestShow({
               {canShowCompleteCta && (
                 <div className="flex items-center gap-2">
                   <>
-                    {isFinal && (
+                    {isFinal && !hasDiagnosticReportCodes && (
                       <Button
                         variant="primary"
                         className="font-semibold"
@@ -583,21 +590,48 @@ export default function ServiceRequestShow({
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <ObservationHistorySheet
-                      patientId={request.encounter.patient.id}
-                      diagnosticReportId={
-                        request.diagnostic_reports[0]?.id || ""
-                      }
-                    >
-                      <DropdownMenuItem
-                        onSelect={(e) => e.preventDefault()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                        }}
+                    {hasDiagnosticReportCodes ? (
+                      diagnosticReportCodes.map((reportCode) => {
+                        const codeReportId = getReportsForCode(
+                          reportCode.code,
+                        )[0]?.id;
+                        if (!codeReportId) {
+                          return null;
+                        }
+                        return (
+                          <ObservationHistorySheet
+                            key={reportCode.code}
+                            patientId={request.encounter.patient.id}
+                            diagnosticReportId={codeReportId}
+                          >
+                            <DropdownMenuItem
+                              onSelect={(e) => e.preventDefault()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                              }}
+                            >
+                              {t("view_observation_history_for_code", {
+                                code: reportCode.display,
+                              })}
+                            </DropdownMenuItem>
+                          </ObservationHistorySheet>
+                        );
+                      })
+                    ) : (
+                      <ObservationHistorySheet
+                        patientId={request.encounter.patient.id}
+                        diagnosticReportId={diagnosticReports[0]?.id || ""}
                       >
-                        {t("view_observation_history")}
-                      </DropdownMenuItem>
-                    </ObservationHistorySheet>
+                        <DropdownMenuItem
+                          onSelect={(e) => e.preventDefault()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                          }}
+                        >
+                          {t("view_observation_history")}
+                        </DropdownMenuItem>
+                      </ObservationHistorySheet>
+                    )}
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
