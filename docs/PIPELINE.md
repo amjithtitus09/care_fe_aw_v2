@@ -23,7 +23,22 @@ stateDiagram-v2
     rework --> human: rework cap reached
     ready --> [*]: human merges
     human --> [*]: human takes over
+    review --> rework: human comment requests a change (comment-triage)
+    qa --> rework: human comment requests a change (comment-triage)
+    ready --> rework: human comment requests a change (comment-triage)
 ```
+
+> **Human comments are a first-class input.** At any state, when a team member leaves a comment or
+> submits a review (with its inline comments) on an enrolled PR, the **comment-triage** watcher reads
+> it and either routes it into `state:rework` (a change request), answers it (a question), or ignores
+> it (noise) — so a human never has to re-drive the machine by hand.
+>
+> _Scope/limits (v1):_ it triggers on general PR comments and **submitted reviews** (the review stage
+> never submits reviews, so these are always human, and a review carries its inline comments). A
+> standalone single inline comment ("Add single comment", not part of a submitted review) is not
+> watched — use the batch review flow or a general comment. Because state is one mutable label, a
+> change request that lands while another stage is mid-run can be overwritten by that stage's terminal
+> transition (a low-probability race); the findings comment persists, so it can be re-triggered.
 
 | Label | Meaning | Set by |
 |-------|---------|--------|
@@ -42,7 +57,8 @@ stateDiagram-v2
 | `enroll.yml` | `pull_request_target`, `check_suite` completed | Deterministic. When `jira-agent` is present, no `state:*` exists, and CI has **completed** (green or red), add `state:review`. |
 | `pr-review.md` | `label_command: state:review` | **Folds CI in.** If required checks failed → hand to `state:rework` (a deep review on non-building code is wasteful). Else do a focused code review; `APPROVE` → `state:qa`, blocking issues → `state:rework`. |
 | `pr-qa.md` | `label_command: state:qa` | Boots the seeded care backend + builds the PR head + serves it with an API proxy and a seed bridge. Agent **decides → seeds (via care's `CareFixtureBase` API) → screenshots** the exact changed feature at desktop+mobile. Clean → `state:ready`; defect → `state:rework`; infra/un-seedable → `state:human`. |
-| `pr-rework.md` | `label_command: state:rework` | Pinned-model fixer. Reads the latest review **or** QA findings, makes a minimal fix, validates (`lint-fix`/`build`/`tsc`), pushes to the branch, and re-labels `state:review`. Hard cap of 3 attempts → `state:human`. |
+| `pr-rework.md` | `label_command: state:rework` | Pinned-model fixer. Reads the latest review, QA, **or human** findings, makes a minimal fix, validates (`lint-fix`/`build`/`tsc`), pushes to the branch, and re-labels `state:review`. Hard cap of 3 attempts → `state:human` (a human change request resets the cap). |
+| `pr-comment-triage.md` | `issue_comment`, `pull_request_review` | **Human-comment watcher.** On an enrolled PR, reads a team member's general comment or submitted review (with its inline comments) and either routes a **change request** into `state:rework` (posting a `(HUMAN-CHANGE-REQUEST …)` findings comment), **answers a question**, or **ignores noise**. Never edits code or merges. Loop-safe: it triggers only on surfaces the pipeline never emits and excludes every pipeline comment by its `<!-- gh-aw` footer. |
 | `ledger.yml` | `pull_request_target` (labeled/unlabeled) | Deterministic. Appends every `state:*` transition to one durable per-PR ledger comment (crash-independent history). |
 | `watchdog.yml` | `schedule` (hourly) | Deterministic. Re-applies the last-known state (from the ledger) to enrolled PRs that lost their `state:*` label (a crashed stage). |
 
