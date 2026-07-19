@@ -56,9 +56,14 @@ tools:
     min-integrity: approved
     toolsets: [repos, issues, pull_requests]
   bash:
-    # The agent runs in a sandbox that blocks interpreter execution (node/npm/python),
-    # so build/lint/type-check are NOT run here — CI and the review stage do that on the
-    # draft PR. These are inspection-only commands for exploring the codebase.
+    # The author runs ONE build tool: the formatter (`npm run format` = prettier --write), so the
+    # first-cut PR is already prettier-clean and CI's "Lint Code Base" check passes on it. A
+    # pre-agent step installs node_modules on the host workspace (see `steps:` below); node_modules
+    # is gitignored, so it never enters the create-pull-request patch. Build/lint/type-check are
+    # still NOT run here — CI and the review/rework stages do that authoritatively on the draft PR.
+    # The rest are inspection-only commands for exploring the codebase.
+    - "npm run format*"
+    - "npm ci*"
     - "git *"
     - "ls*"
     - "cat*"
@@ -100,6 +105,16 @@ safe-outputs:
 steps:
   - name: Ensure full working tree
     run: git sparse-checkout disable 2>/dev/null || true
+  - name: Install dependencies (so the agent can run the formatter)
+    # Host-side install so the agent can run `npm run format` (prettier) on its first cut. This is
+    # the only build tool the author uses; node_modules is gitignored, so it never lands in the
+    # create-pull-request patch. Best-effort: if install fails the agent still authors the PR
+    # (CI/rework will format later) — it must not block authoring.
+    continue-on-error: true
+    run: |
+      set -uo pipefail
+      npm ci --prefer-offline --no-audit --no-fund || npm install --no-audit --no-fund || \
+        echo "::warning::dependency install failed; the author will skip formatting (CI/rework will format later)"
   - name: Resolve and sanitize Jira task context (untrusted)
     env:
       RAW_KEY: ${{ github.event.client_payload.issue_key || github.event.inputs.issue_key }}
@@ -207,14 +222,28 @@ Edit only the application files needed (`src/**`, `tests/**`, `public/locale/en.
 strings). Keep the change surgical and consistent with the codebase. Do not refactor unrelated code,
 and do not touch workflow, CI, or configuration files.
 
-## Step 3 — Self-review statically (you cannot build here)
+## Step 3 — Format with prettier (the one build tool you run)
 
-This agent runs in a sandbox that **cannot execute `npm`, `node`, `npx`, or `python`** and has no
-`node_modules` installed — so you cannot run lint, build, or type-check yourself. The draft PR you
-open is validated automatically downstream by CI and the review/QA stages before any human merges
-it. Do **not** try to run build tooling.
+Once your edits are done, run the repo's formatter so your first cut is prettier-clean and CI's
+"Lint Code Base" check passes on the PR:
 
-Instead, verify your change by reading, carefully:
+```bash
+npm run format
+```
+
+This runs `prettier --write` on `./src ./tests` (dependencies were pre-installed for you). Its output
+is exactly what CI's `prettier/prettier` rule expects, so running it is the ONLY correct way to be
+prettier-clean. **Never hand-edit whitespace, indentation, or line-wrapping to satisfy prettier** —
+prettier's layout will not converge by hand. If `npm run format` reports it changed files, that is
+expected; keep those changes. (If the command is unavailable because dependency install failed
+upstream, skip it and open the PR anyway — CI and the rework stage will format it later.)
+
+This is the **only** build tool you run: still do **not** run lint, `tsc`, or a full build — those are
+validated authoritatively downstream by CI and the review/QA stages before any human merges.
+
+## Step 3b — Self-review statically
+
+Also verify your change by reading, carefully:
 
 - Every symbol, component, or import you use already exists and is imported (check the file's
   existing imports and the module you import from).
@@ -226,9 +255,9 @@ Instead, verify your change by reading, carefully:
 
 ## Step 4 — Open the draft PR
 
-Always open the draft PR for a task you implemented — do not withhold it because you could not build
-locally (you cannot; that is expected). Use the `create-pull-request` safe output. It packages the
-commits you made:
+Always open the draft PR for a task you implemented — do not withhold it because you could not fully
+build locally (that is expected; only formatting runs here). Use the `create-pull-request` safe
+output. It packages the commits you made:
 
 - **Branch:** `jira/<issue_key>` using the `issue_key` from `/tmp/gh-aw/agent/jira-task.md` (exact —
   the workflow preserves it; e.g. `jira/ENG-395`).
@@ -237,8 +266,9 @@ commits you made:
 - **Body:** a concise GitHub-flavoured-Markdown description containing:
   - **What & why** — what the task asked and what you changed.
   - **Jira:** the `issue_key`.
-  - **Validation** — the static checks you performed, and an explicit note that lint/build/
-    type-check were **not** run locally (the sandbox cannot) and must run in CI / the review stage.
+  - **Validation** — the static checks you performed, that you ran `npm run format` (prettier), and
+    an explicit note that lint/`tsc`/build were **not** run locally and must run in CI / the review
+    stage.
   - A short **review checklist** of anything you were unsure about.
   - A note that this is an automated first draft authored on a pinned model, pending review + QA.
 
