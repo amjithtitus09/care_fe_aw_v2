@@ -74,6 +74,7 @@ timeout-minutes: 20
 
 imports:
   - shared/jira-report.md
+  - shared/skills/care-review.md
 
 steps:
   - name: Summarize deterministic CI status for the head commit
@@ -169,18 +170,38 @@ of `passed`, `failed`, `pending`, `none`.
 - **`passed`**, **`pending`**, or **`none`** → continue to Step 2 for the code review. (`pending`
   should be rare — enroll waits for CI to complete — so proceed but mention CI was still settling.)
 
-## Step 2 — Gather the diff
+## Step 2 — Gather the diff, then reconstruct intent and map the ripple
 
-Use the GitHub tools to get the PR metadata, the list of changed files, and the diff/patch for each
-changed file. Focus your review strictly on the changed lines and their immediate context — do not
-review unrelated existing code.
+**Read the "CARE review mindset" section imported at the end of this prompt and apply it — it is not
+optional.** It exists because a real defect shipped through this stage when review looked only at the
+*changed lines*: the diff made an entity go one → many, and several unchanged `[0]` usages in the
+same file were silently made wrong.
+
+1. Use the GitHub tools to get the PR metadata, the list of changed files, and the diff/patch for
+   each changed file.
+2. **Reconstruct the intent from the code** (mindset R1): for each distinct change, what it does and
+   the requirement it implies. You need this to judge whether unchanged code still holds.
+3. **Map the ripple set** (mindset R2 — the part a changed-lines-only review misses): for every
+   shared surface whose **shape, semantics, or cardinality** the diff changes (a data shape one →
+   many, a component contract, a hook return, a route param, an enum/ValueSet), grep the changed
+   file(s) and their module for **every other usage** of that surface — `[0]`/`[0]?.`, `.find(`,
+   single-item assumptions, a completion/enable **gate**, a **nav/print/"view"/history** handler, a
+   **count**/`.length`. These are usually on lines the diff did **not** touch.
+
+Center your review on the diff and its immediate context, **plus** the ripple set from step 3 —
+unchanged code that the change's new shape invalidates **is in scope**. Do not expand beyond the
+other usages of the specific surfaces the diff touches (this is not a whole-file/whole-repo review);
+don't review unrelated existing code.
 
 ## Step 3 — Review for issues
 
 Look for, in priority order:
 
 1. **Correctness & logic bugs** — wrong conditions, off-by-one, unhandled `null`/`undefined`, race
-   conditions, incorrect state updates, broken effects.
+   conditions, incorrect state updates, broken effects, **and ripple regressions (Step 2 / mindset
+   R2): an *other usage* of a shared surface the diff touched that is now wrong at the new
+   shape/cardinality, even on an unchanged line** (e.g. a `[0]` gate or "view" that assumed one item
+   when the change allows many).
 2. **Security** — XSS via `dangerouslySetInnerHTML`, unsafe URL handling, leaking PHI/patient data
    in logs, missing authorization checks.
 3. **Data integrity** — missing/incorrect `zod` validation, unsafe `any`, unsafe type assertions on
@@ -204,8 +225,9 @@ For the most important findings (at most **10**), create inline review comments 
 - Be specific and actionable.
 
 A finding is **blocking** if it is a correctness, security, or data-integrity defect that must be
-fixed before merge. Accessibility/i18n gaps on the changed surface are blocking too. Pure
-maintainability nits are **not** blocking.
+fixed before merge — **including a ripple regression** (an other usage of a shared surface the diff
+touched that is now wrong at the new shape/cardinality, even on an unchanged line). Accessibility/i18n
+gaps on the changed surface are blocking too. Pure maintainability nits are **not** blocking.
 
 ## Step 5 — Decide the verdict and advance the pipeline
 
@@ -216,6 +238,9 @@ maintainability nits are **not** blocking.
 - If CI did **not** fail and you found **no blocking** findings → transition to **`state:qa`**:
   `remove_labels` the other state set, `add_labels` `state:qa`, and post one short `add-comment`
   noting the review passed and QA is next (mention any non-blocking observations briefly).
+  **Before passing**, confirm you actually did the ripple check (Step 2 / mindset R2): if the diff
+  changed a shared surface's shape or cardinality and you did not verify its other usages, you have
+  not finished — do that first, because that is the class of defect this stage exists to catch.
 - Only use **`state:human`** if you genuinely could not read the PR (an infrastructure/tool error),
   not for ordinary review outcomes.
 
