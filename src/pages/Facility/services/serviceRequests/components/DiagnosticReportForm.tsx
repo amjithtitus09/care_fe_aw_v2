@@ -89,6 +89,7 @@ interface DiagnosticReportFormProps {
   };
   specimens: SpecimenRead[];
   disableEdit: boolean;
+  code?: Code;
 }
 
 // Interface for component values
@@ -121,6 +122,7 @@ export function DiagnosticReportForm({
   activityDefinition,
   specimens,
   disableEdit,
+  code,
 }: DiagnosticReportFormProps) {
   const { t } = useTranslation();
   const [observations, setObservations] = useState<ObservationsByDefinition>(
@@ -128,7 +130,7 @@ export function DiagnosticReportForm({
   );
   const [isExpanded, setIsExpanded] = useState(true);
   const [selectedReportCode, setSelectedReportCode] = useState<Code | null>(
-    null,
+    code ?? null,
   );
   const [openUploadDialog, setOpenUploadDialog] = useState(false);
   const [conclusion, setConclusion] = useState<string>("");
@@ -1239,7 +1241,8 @@ export function DiagnosticReportForm({
                   </p>
                 </div>
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 justify-center">
-                  {activityDefinition?.diagnostic_report_codes &&
+                  {!code &&
+                    activityDefinition?.diagnostic_report_codes &&
                     activityDefinition.diagnostic_report_codes.length > 0 && (
                       <div className="flex-1 min-w-0">
                         <Select

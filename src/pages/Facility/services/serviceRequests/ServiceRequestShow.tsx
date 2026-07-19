@@ -266,6 +266,10 @@ export default function ServiceRequestShow({
   const observationRequirements =
     activityDefinition.observation_result_requirements ?? [];
   const diagnosticReports = request.diagnostic_reports || [];
+  const diagnosticReportCodes =
+    activityDefinition.diagnostic_report_codes ?? [];
+  const reportsForCode = (codeValue: string) =>
+    diagnosticReports.filter((report) => report.code?.code === codeValue);
 
   const assignedSpecimenIds = new Set<string>();
 
@@ -323,7 +327,14 @@ export default function ServiceRequestShow({
   };
 
   const isFinal =
-    request?.diagnostic_reports?.[0]?.status === DiagnosticReportStatus.final;
+    diagnosticReportCodes.length > 0
+      ? diagnosticReportCodes.every(
+          (code) =>
+            reportsForCode(code.code)[0]?.status ===
+            DiagnosticReportStatus.final,
+        )
+      : request?.diagnostic_reports?.[0]?.status ===
+        DiagnosticReportStatus.final;
 
   const canMarkAsComplete =
     isFinal ||
@@ -351,7 +362,7 @@ export default function ServiceRequestShow({
               {canShowCompleteCta && (
                 <div className="flex items-center gap-2">
                   <>
-                    {isFinal && (
+                    {isFinal && diagnosticReportCodes.length <= 1 && (
                       <Button
                         variant="primary"
                         className="font-semibold"
@@ -566,60 +577,126 @@ export default function ServiceRequestShow({
             </Card>
           )}
 
-          <div className="space-y-3 pt-5">
-            {observationRequirements.length > 0 && (
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl font-semibold">{t("test_results")}</h2>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon">
-                      <MoreVertical className="size-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <ObservationHistorySheet
+          {diagnosticReportCodes.length > 0 ? (
+            diagnosticReportCodes.map((code) => {
+              const codeReports = reportsForCode(code.code);
+              const codeReport = codeReports[0];
+              return (
+                <div key={code.code} className="space-y-3 pt-5">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xl font-semibold">
+                      {t("test_results")}: {code.display || code.code}
+                    </h2>
+                    {observationRequirements.length > 0 && codeReport && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon">
+                            <MoreVertical className="size-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <ObservationHistorySheet
+                            patientId={request.encounter.patient.id}
+                            diagnosticReportId={codeReport.id}
+                          >
+                            <DropdownMenuItem
+                              onSelect={(e) => e.preventDefault()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                              }}
+                            >
+                              {t("view_observation_history")}
+                            </DropdownMenuItem>
+                          </ObservationHistorySheet>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
+                  </div>
+                  {codeReport?.status !== DiagnosticReportStatus.final && (
+                    <DiagnosticReportForm
                       patientId={request.encounter.patient.id}
-                      diagnosticReportId={
-                        request.diagnostic_reports[0]?.id || ""
-                      }
-                    >
-                      <DropdownMenuItem
-                        onSelect={(e) => e.preventDefault()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                        }}
-                      >
-                        {t("view_observation_history")}
-                      </DropdownMenuItem>
-                    </ObservationHistorySheet>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                      facilityId={facilityId}
+                      serviceRequestId={serviceRequestId}
+                      observationDefinitions={observationRequirements}
+                      diagnosticReports={codeReports}
+                      activityDefinition={activityDefinition}
+                      specimens={request.specimens || []}
+                      disableEdit={disableEdit}
+                      code={code}
+                    />
+                  )}
+                  {codeReports.length > 0 && (
+                    <DiagnosticReportReview
+                      facilityId={facilityId}
+                      patientId={request.encounter.patient.id}
+                      serviceRequestId={serviceRequestId}
+                      diagnosticReports={codeReports}
+                      disableEdit={disableEdit}
+                    />
+                  )}
+                </div>
+              );
+            })
+          ) : (
+            <>
+              <div className="space-y-3 pt-5">
+                {observationRequirements.length > 0 && (
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xl font-semibold">
+                      {t("test_results")}
+                    </h2>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon">
+                          <MoreVertical className="size-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <ObservationHistorySheet
+                          patientId={request.encounter.patient.id}
+                          diagnosticReportId={
+                            request.diagnostic_reports[0]?.id || ""
+                          }
+                        >
+                          <DropdownMenuItem
+                            onSelect={(e) => e.preventDefault()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                            }}
+                          >
+                            {t("view_observation_history")}
+                          </DropdownMenuItem>
+                        </ObservationHistorySheet>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                )}
+                {(!diagnosticReports.length ||
+                  diagnosticReports[0]?.status !==
+                    DiagnosticReportStatus.final) && (
+                  <DiagnosticReportForm
+                    patientId={request.encounter.patient.id}
+                    facilityId={facilityId}
+                    serviceRequestId={serviceRequestId}
+                    observationDefinitions={observationRequirements}
+                    diagnosticReports={diagnosticReports}
+                    activityDefinition={activityDefinition}
+                    specimens={request.specimens || []}
+                    disableEdit={disableEdit}
+                  />
+                )}
               </div>
-            )}
-            {(!diagnosticReports.length ||
-              diagnosticReports[0]?.status !==
-                DiagnosticReportStatus.final) && (
-              <DiagnosticReportForm
-                patientId={request.encounter.patient.id}
-                facilityId={facilityId}
-                serviceRequestId={serviceRequestId}
-                observationDefinitions={observationRequirements}
-                diagnosticReports={diagnosticReports}
-                activityDefinition={activityDefinition}
-                specimens={request.specimens || []}
-                disableEdit={disableEdit}
-              />
-            )}
-          </div>
 
-          {diagnosticReports.length > 0 && (
-            <DiagnosticReportReview
-              facilityId={facilityId}
-              patientId={request.encounter.patient.id}
-              serviceRequestId={serviceRequestId}
-              diagnosticReports={diagnosticReports}
-              disableEdit={disableEdit}
-            />
+              {diagnosticReports.length > 0 && (
+                <DiagnosticReportReview
+                  facilityId={facilityId}
+                  patientId={request.encounter.patient.id}
+                  serviceRequestId={serviceRequestId}
+                  diagnosticReports={diagnosticReports}
+                  disableEdit={disableEdit}
+                />
+              )}
+            </>
           )}
         </div>
       </div>
