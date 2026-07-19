@@ -599,9 +599,8 @@ export default function ServiceRequestShow({
                 </DropdownMenu>
               </div>
             )}
+            {/* Render a dedicated report form per diagnostic report code so a separate diagnostic report can be created for each code. */}
             {hasDiagnosticReportCodes ? (
-              // Render a dedicated report form per diagnostic report code so
-              // that a separate diagnostic report can be created for each code.
               diagnosticReportCodes.map((reportCode) => {
                 const codeReports = diagnosticReports.filter(
                   (report) => report.code?.code === reportCode.code,
