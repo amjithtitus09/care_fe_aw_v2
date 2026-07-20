@@ -81,7 +81,8 @@ interface DiagnosticReportFormProps {
   facilityId: string;
   serviceRequestId: string;
   observationDefinitions: ObservationDefinitionReadSpec[];
-  diagnosticReports: DiagnosticReportRead[];
+  report: DiagnosticReportRead | null;
+  reportCode: Code | null;
   activityDefinition?: {
     diagnostic_report_codes?: Code[];
     classification?: string;
@@ -117,7 +118,8 @@ export function DiagnosticReportForm({
   patientId,
   serviceRequestId,
   observationDefinitions,
-  diagnosticReports,
+  report,
+  reportCode,
   activityDefinition,
   specimens,
   disableEdit,
@@ -127,16 +129,12 @@ export function DiagnosticReportForm({
     {},
   );
   const [isExpanded, setIsExpanded] = useState(true);
-  const [selectedReportCode, setSelectedReportCode] = useState<Code | null>(
-    null,
-  );
   const [openUploadDialog, setOpenUploadDialog] = useState(false);
   const [conclusion, setConclusion] = useState<string>("");
   const queryClient = useQueryClient();
 
-  // Get the latest report if any exists
-  const latestReport =
-    diagnosticReports.length > 0 ? diagnosticReports[0] : null;
+  // The report bound to this form (one report per diagnostic report code)
+  const latestReport = report;
   const hasReport = !!latestReport;
 
   // Check if all required specimens are collected
@@ -199,21 +197,10 @@ export function DiagnosticReportForm({
 
   // Effect to handle diagnostic reports changes
   useEffect(() => {
-    const latestReport = diagnosticReports[0];
     if (latestReport) {
-      // If we have a new report, update the UI accordingly
-      setSelectedReportCode(latestReport.code || null);
       setIsExpanded(true);
     }
-  }, [diagnosticReports]);
-
-  // Effect to handle fullReport changes
-  useEffect(() => {
-    if (fullReport) {
-      // When we get the full report details, ensure UI is in correct state
-      setSelectedReportCode(fullReport.code || null);
-    }
-  }, [fullReport]);
+  }, [latestReport]);
 
   // Upserting observations for a diagnostic report
   const { mutate: upsertObservations, isPending: isUpsertingObservations } =
@@ -483,7 +470,7 @@ export function DiagnosticReportForm({
         status: DiagnosticReportStatus.preliminary,
         category,
         service_request: serviceRequestId,
-        code: selectedReportCode || undefined,
+        code: reportCode || undefined,
       });
     }
   }
@@ -840,7 +827,7 @@ export function DiagnosticReportForm({
                   <p className="flex items-center gap-1.5">
                     <NotepadText className="size-6 text-gray-950 font-normal text-base stroke-[1.5px]" />{" "}
                     <span className="text-base/9 text-gray-950 font-medium">
-                      {t("test_results_entry")}
+                      {reportCode?.display || t("test_results_entry")}
                     </span>
                   </p>
                 </CardTitle>
@@ -1239,49 +1226,19 @@ export function DiagnosticReportForm({
                   </p>
                 </div>
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 justify-center">
-                  {activityDefinition?.diagnostic_report_codes &&
-                    activityDefinition.diagnostic_report_codes.length > 0 && (
-                      <div className="flex-1 min-w-0">
-                        <Select
-                          value={selectedReportCode?.code}
-                          onValueChange={(value) => {
-                            const code =
-                              activityDefinition.diagnostic_report_codes?.find(
-                                (c) => c.code === value,
-                              );
-                            setSelectedReportCode(code || null);
-                          }}
-                          disabled={!hasCollectedSpecimens || disableEdit}
-                        >
-                          <SelectTrigger className="w-full">
-                            <SelectValue
-                              placeholder={t("select_diagnostic_report_type")}
-                            />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {activityDefinition.diagnostic_report_codes.map(
-                              (code) => (
-                                <SelectItem key={code.code} value={code.code}>
-                                  <div className="flex flex-col">
-                                    <span className="truncate">
-                                      {code.display} ({code.code})
-                                    </span>
-                                  </div>
-                                </SelectItem>
-                              ),
-                            )}
-                          </SelectContent>
-                        </Select>
+                  {reportCode && (
+                    <div className="flex-1 min-w-0">
+                      <div className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950">
+                        <span className="truncate">
+                          {reportCode.display} ({reportCode.code})
+                        </span>
                       </div>
-                    )}
+                    </div>
+                  )}
                   <Button
                     onClick={handleCreateReport}
                     disabled={
-                      disableEdit ||
-                      isCreatingReport ||
-                      !hasCollectedSpecimens ||
-                      (!!activityDefinition?.diagnostic_report_codes?.length &&
-                        !selectedReportCode)
+                      disableEdit || isCreatingReport || !hasCollectedSpecimens
                     }
                     className="w-full sm:w-auto sm:shrink-0"
                   >

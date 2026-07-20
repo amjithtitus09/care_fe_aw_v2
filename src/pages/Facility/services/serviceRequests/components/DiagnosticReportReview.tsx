@@ -47,14 +47,14 @@ interface DiagnosticReportReviewProps {
   facilityId: string;
   patientId: string;
   serviceRequestId: string;
-  diagnosticReports: DiagnosticReportRead[];
+  report: DiagnosticReportRead;
   disableEdit: boolean;
 }
 
 export function DiagnosticReportReview({
   facilityId,
   patientId,
-  diagnosticReports,
+  report,
   disableEdit,
 }: DiagnosticReportReviewProps) {
   const { t } = useTranslation();
@@ -62,7 +62,7 @@ export function DiagnosticReportReview({
   const [conclusion, setConclusion] = useState<string>("");
   const [showApproveDialog, setShowApproveDialog] = useState(false);
   const queryClient = useQueryClient();
-  const latestReport = diagnosticReports[0];
+  const latestReport = report;
 
   // Fetch the full diagnostic report to get observations
   const { data: fullReport, isLoading: isLoadingReport } = useQuery({
