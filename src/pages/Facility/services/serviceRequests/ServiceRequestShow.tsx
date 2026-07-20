@@ -1,5 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckIcon, MoreVertical, PrinterIcon } from "lucide-react";
+import {
+  ArrowLeft,
+  CheckIcon,
+  ChevronDown,
+  MoreVertical,
+  PrinterIcon,
+} from "lucide-react";
 import { navigate } from "raviger";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -395,6 +401,7 @@ export default function ServiceRequestShow({
                           <DropdownMenuTrigger asChild>
                             <Button variant="primary" className="font-semibold">
                               {t("view_report")}
+                              <ChevronDown className="size-4" />
                               <ShortcutBadge actionId="view-report" />
                             </Button>
                           </DropdownMenuTrigger>
