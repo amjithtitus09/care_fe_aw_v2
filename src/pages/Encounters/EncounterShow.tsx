@@ -242,7 +242,7 @@ export const EncounterShow = (props: Props) => {
                 encounter={selectedEncounter}
                 className={cn(
                   buttonVariants({ variant: "primary_gradient" }),
-                  "text-base font-semibold rounded-md w-full",
+                  "text-base font-semibold rounded-md w-full md:w-auto",
                 )}
               />
 
