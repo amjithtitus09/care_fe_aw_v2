@@ -1738,10 +1738,17 @@ const MedicationRequestGridRow: React.FC<MedicationRequestGridRowProps> = ({
                   {di?.dose_and_rate?.dose_range ? (
                     <Input
                       readOnly
+                      disabled={disabled || isReadOnly}
                       value={formatDoseRange(di.dose_and_rate.dose_range)}
-                      onClick={() => setShowDosageDialog(dIdx)}
+                      onClick={() => {
+                        if (disabled || isReadOnly) return;
+                        setShowDosageDialog(dIdx);
+                      }}
                       className={cn(
-                        "h-9 text-sm cursor-pointer",
+                        "h-9 text-sm",
+                        disabled || isReadOnly
+                          ? "cursor-not-allowed"
+                          : "cursor-pointer",
                         hasError(fieldKey) && "border-red-500",
                       )}
                     />
