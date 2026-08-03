@@ -10,7 +10,11 @@ import {
 import scheduleApi from "@/types/scheduling/scheduleApi";
 import { TokenActiveStatuses, TokenStatus } from "@/types/tokens/token/token";
 import tokenApi from "@/types/tokens/token/tokenApi";
-import { BatchRequestObject, useBatchRequest } from "@/Utils/request/batch";
+import {
+  BatchRequestObject,
+  findSuccessfulResult,
+  useBatchRequest,
+} from "@/Utils/request/batch";
 import { useQueryClient } from "@tanstack/react-query";
 import { navigate } from "raviger";
 import { useTranslation } from "react-i18next";
@@ -30,14 +34,14 @@ export function useEncounterProgressController({
 
   const { mutate: executeBatch, isPending } = useBatchRequest({
     onSuccess: ({ results }) => {
-      if (results.some((r) => r.reference_id === "encounter-closed")) {
+      if (findSuccessfulResult(results, "encounter-closed")) {
         queryClient.invalidateQueries({
           queryKey: ["encounter", encounter.id],
         });
         toast.success(t("encounter_marked_as_complete"));
       }
 
-      if (results.some((r) => r.reference_id === "appointment-closed")) {
+      if (findSuccessfulResult(results, "appointment-closed")) {
         queryClient.invalidateQueries({
           queryKey: ["encounter", encounter.id],
         });

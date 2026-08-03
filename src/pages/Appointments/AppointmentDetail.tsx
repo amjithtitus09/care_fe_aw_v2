@@ -114,7 +114,11 @@ import { FacilityRead } from "@/types/facility/facility";
 import { TokenFinalStatuses, TokenStatus } from "@/types/tokens/token/token";
 import tokenApi from "@/types/tokens/token/tokenApi";
 import { ShortcutBadge } from "@/Utils/keyboardShortcutComponents";
-import { BatchRequestObject, useBatchRequest } from "@/Utils/request/batch";
+import {
+  BatchRequestObject,
+  findSuccessfulResult,
+  useBatchRequest,
+} from "@/Utils/request/batch";
 import { formatPhoneNumberIntl } from "react-phone-number-input";
 import { toast } from "sonner";
 
@@ -801,15 +805,13 @@ const AppointmentActions = ({
 
   const { mutate: executeBatch, isPending: isPending } = useBatchRequest({
     onSuccess: ({ results }) => {
-      if (
-        results.find((result) => result.reference_id === "cancel-appointment")
-      ) {
+      if (findSuccessfulResult(results, "cancel-appointment")) {
         queryClient.invalidateQueries({
           queryKey: ["appointment", appointment.id],
         });
         toast.success(t("appointment_cancelled"));
       }
-      if (results.find((result) => result.reference_id === "token-cancelled")) {
+      if (findSuccessfulResult(results, "token-cancelled")) {
         queryClient.invalidateQueries({
           queryKey: [
             "infinite-tokens",
@@ -825,28 +827,25 @@ const AppointmentActions = ({
           ],
         });
       }
-      if (
-        results.find(
-          (result) => result.reference_id === "reschedule-appointment",
-        )
-      ) {
+      const rescheduleResult = findSuccessfulResult(
+        results,
+        "reschedule-appointment",
+      );
+      if (rescheduleResult) {
         queryClient.invalidateQueries({
           queryKey: ["appointment", appointment.id],
         });
         setIsRescheduleOpen(false);
         setSelectedSlotId(undefined);
         setRescheduleReason("");
-        const result = results.find(
-          (result) => result.reference_id === "reschedule-appointment",
-        );
-        const newAppointment = result?.data as Appointment;
+        const newAppointment = rescheduleResult.data as Appointment;
         if (newAppointment) {
           navigate(
             `/facility/${facilityId}/patient/${appointment.patient.id}/appointments/${newAppointment.id}`,
           );
         }
       }
-      if (results.find((result) => result.reference_id === "token-cancelled")) {
+      if (findSuccessfulResult(results, "token-cancelled")) {
         queryClient.invalidateQueries({
           queryKey: [
             "infinite-tokens",
