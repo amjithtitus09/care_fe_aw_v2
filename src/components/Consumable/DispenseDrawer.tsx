@@ -85,7 +85,10 @@ import {
   round,
   zodDecimal,
 } from "@/Utils/decimal";
-import { isLotAllowedForDispensing } from "@/Utils/inventory";
+import {
+  isLotAllowedForDispensing,
+  sortInventoriesByExpiry,
+} from "@/Utils/inventory";
 import { ShortcutBadge } from "@/Utils/keyboardShortcutComponents";
 
 interface SelectedLocation {
@@ -214,7 +217,9 @@ export default function DispenseDrawer({
 
         return {
           productKnowledgeId,
-          inventories: inventoriesResponse.results || [],
+          inventories: sortInventoriesByExpiry(
+            inventoriesResponse.results || [],
+          ),
         };
       });
 

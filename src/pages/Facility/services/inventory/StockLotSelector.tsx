@@ -24,6 +24,7 @@ import { isPositive, round } from "@/Utils/decimal";
 import {
   getExpiryBadgeVariant,
   isProductRestrictedFromDispensing,
+  sortInventoriesByExpiry,
 } from "@/Utils/inventory";
 import query from "@/Utils/request/query";
 import careConfig from "@careConfig";
@@ -87,7 +88,9 @@ export default function StockLotSelector({
     enabled: Boolean(facilityId && locationId && productKnowledge?.id),
   });
 
-  const inventories = queryInventories?.results || availableInventories || [];
+  const inventories = sortInventoriesByExpiry(
+    queryInventories?.results || availableInventories || [],
+  );
 
   const selectedLotsWithInventory = selectedLots.filter(
     (lot) => lot.selectedInventoryId,
