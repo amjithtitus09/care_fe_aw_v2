@@ -56,6 +56,27 @@ export function isLotAllowedForDispensing(
 }
 
 /**
+ * Sorts inventory lots by earliest expiry first (FEFO - First Expired, First Out).
+ * Lots without an expiration date are placed last.
+ * @param inventories - The list of inventory lots to sort
+ * @returns A new array sorted by earliest expiration date first
+ */
+export function sortInventoriesByExpiry<
+  T extends { product: { expiration_date?: string } },
+>(inventories: T[]): T[] {
+  return [...inventories].sort((a, b) => {
+    const aDate = a.product.expiration_date;
+    const bDate = b.product.expiration_date;
+
+    if (!aDate && !bDate) return 0;
+    if (!aDate) return 1;
+    if (!bDate) return -1;
+
+    return new Date(aDate).getTime() - new Date(bDate).getTime();
+  });
+}
+
+/**
  * Gets the badge variant for displaying expiry status
  * @param expirationDate - The expiration date string
  * @returns Badge variant - "destructive" for expired, "yellow" for expiring soon, "primary" for valid
