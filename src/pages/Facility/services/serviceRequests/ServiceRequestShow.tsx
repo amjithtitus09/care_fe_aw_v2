@@ -266,6 +266,11 @@ export default function ServiceRequestShow({
   const observationRequirements =
     activityDefinition.observation_result_requirements ?? [];
   const diagnosticReports = request.diagnostic_reports || [];
+  const reportCodes = activityDefinition.diagnostic_report_codes ?? [];
+  const requiredReportCount = reportCodes.length > 0 ? reportCodes.length : 1;
+  const finalReports = diagnosticReports.filter(
+    (report) => report.status === DiagnosticReportStatus.final,
+  );
 
   const assignedSpecimenIds = new Set<string>();
 
@@ -323,7 +328,11 @@ export default function ServiceRequestShow({
   };
 
   const isFinal =
-    request?.diagnostic_reports?.[0]?.status === DiagnosticReportStatus.final;
+    diagnosticReports.length > 0 &&
+    diagnosticReports.every(
+      (report) => report.status === DiagnosticReportStatus.final,
+    ) &&
+    finalReports.length >= requiredReportCount;
 
   const canMarkAsComplete =
     isFinal ||
@@ -351,13 +360,13 @@ export default function ServiceRequestShow({
               {canShowCompleteCta && (
                 <div className="flex items-center gap-2">
                   <>
-                    {isFinal && (
+                    {isFinal && finalReports.length === 1 && (
                       <Button
                         variant="primary"
                         className="font-semibold"
                         onClick={() =>
                           navigate(
-                            `/facility/${facilityId}/patient/${request.encounter.patient.id}/diagnostic_reports/${request.diagnostic_reports[0].id}`,
+                            `/facility/${facilityId}/patient/${request.encounter.patient.id}/diagnostic_reports/${finalReports[0].id}`,
                           )
                         }
                       >
@@ -577,39 +586,89 @@ export default function ServiceRequestShow({
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <ObservationHistorySheet
-                      patientId={request.encounter.patient.id}
-                      diagnosticReportId={
-                        request.diagnostic_reports[0]?.id || ""
-                      }
-                    >
-                      <DropdownMenuItem
-                        onSelect={(e) => e.preventDefault()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                        }}
+                    {diagnosticReports.length === 0 ? (
+                      <ObservationHistorySheet
+                        patientId={request.encounter.patient.id}
+                        diagnosticReportId=""
                       >
-                        {t("view_observation_history")}
-                      </DropdownMenuItem>
-                    </ObservationHistorySheet>
+                        <DropdownMenuItem
+                          onSelect={(e) => e.preventDefault()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                          }}
+                        >
+                          {t("view_observation_history")}
+                        </DropdownMenuItem>
+                      </ObservationHistorySheet>
+                    ) : (
+                      diagnosticReports.map((report) => (
+                        <ObservationHistorySheet
+                          key={report.id}
+                          patientId={request.encounter.patient.id}
+                          diagnosticReportId={report.id}
+                        >
+                          <DropdownMenuItem
+                            onSelect={(e) => e.preventDefault()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                            }}
+                          >
+                            {report.code?.display
+                              ? `${t("view_observation_history")}: ${report.code.display}`
+                              : t("view_observation_history")}
+                          </DropdownMenuItem>
+                        </ObservationHistorySheet>
+                      ))
+                    )}
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
             )}
-            {(!diagnosticReports.length ||
-              diagnosticReports[0]?.status !==
-                DiagnosticReportStatus.final) && (
-              <DiagnosticReportForm
-                patientId={request.encounter.patient.id}
-                facilityId={facilityId}
-                serviceRequestId={serviceRequestId}
-                observationDefinitions={observationRequirements}
-                diagnosticReports={diagnosticReports}
-                activityDefinition={activityDefinition}
-                specimens={request.specimens || []}
-                disableEdit={disableEdit}
-              />
-            )}
+            {reportCodes.length > 0
+              ? reportCodes
+                  .map((code) => {
+                    const reportsForCode = diagnosticReports.filter(
+                      (report) => report.code?.code === code.code,
+                    );
+                    const isCodeFinal = reportsForCode.some(
+                      (report) =>
+                        report.status === DiagnosticReportStatus.final,
+                    );
+                    if (isCodeFinal) {
+                      return null;
+                    }
+                    return (
+                      <DiagnosticReportForm
+                        key={code.code}
+                        patientId={request.encounter.patient.id}
+                        facilityId={facilityId}
+                        serviceRequestId={serviceRequestId}
+                        observationDefinitions={observationRequirements}
+                        diagnosticReports={reportsForCode}
+                        activityDefinition={{
+                          ...activityDefinition,
+                          diagnostic_report_codes: [code],
+                        }}
+                        specimens={request.specimens || []}
+                        disableEdit={disableEdit}
+                      />
+                    );
+                  })
+                  .filter(Boolean)
+              : (!diagnosticReports.length ||
+                  diagnosticReports[0]?.status !==
+                    DiagnosticReportStatus.final) && (
+                  <DiagnosticReportForm
+                    patientId={request.encounter.patient.id}
+                    facilityId={facilityId}
+                    serviceRequestId={serviceRequestId}
+                    observationDefinitions={observationRequirements}
+                    diagnosticReports={diagnosticReports}
+                    activityDefinition={activityDefinition}
+                    specimens={request.specimens || []}
+                    disableEdit={disableEdit}
+                  />
+                )}
           </div>
 
           {diagnosticReports.length > 0 && (

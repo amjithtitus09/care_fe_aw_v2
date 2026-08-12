@@ -207,6 +207,14 @@ export function DiagnosticReportForm({
     }
   }, [diagnosticReports]);
 
+  // Auto-select the report code when only a single code is available
+  useEffect(() => {
+    const reportCodes = activityDefinition?.diagnostic_report_codes;
+    if (!hasReport && reportCodes?.length === 1) {
+      setSelectedReportCode(reportCodes[0]);
+    }
+  }, [activityDefinition?.diagnostic_report_codes, hasReport]);
+
   // Effect to handle fullReport changes
   useEffect(() => {
     if (fullReport) {
@@ -840,7 +848,9 @@ export function DiagnosticReportForm({
                   <p className="flex items-center gap-1.5">
                     <NotepadText className="size-6 text-gray-950 font-normal text-base stroke-[1.5px]" />{" "}
                     <span className="text-base/9 text-gray-950 font-medium">
-                      {t("test_results_entry")}
+                      {selectedReportCode?.display
+                        ? `${t("test_results_entry")}: ${selectedReportCode.display}`
+                        : t("test_results_entry")}
                     </span>
                   </p>
                 </CardTitle>
