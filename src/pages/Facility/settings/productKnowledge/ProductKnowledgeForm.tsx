@@ -35,7 +35,7 @@ import ValueSetSelect from "@/components/Questionnaire/ValueSetSelect";
 
 import mutate from "@/Utils/request/mutate";
 import query from "@/Utils/request/query";
-import { generateSlug } from "@/Utils/utils";
+import { generateSlug, slugSchema } from "@/Utils/utils";
 import { Code, CodeSchema } from "@/types/base/code/code";
 import { ResourceCategoryResourceType } from "@/types/base/resourceCategory/resourceCategory";
 import { DOSAGE_UNITS_CODES } from "@/types/emr/medicationRequest/medicationRequest";
@@ -55,18 +55,7 @@ const createFormSchema = (
 ) => {
   return z.object({
     name: z.string().min(1, { message: t("name_is_required") }),
-    slug_value: z
-      .string()
-      .trim()
-      .min(5, {
-        message: t("character_count_validation", { min: 5, max: 25 }),
-      })
-      .max(25, {
-        message: t("character_count_validation", { min: 5, max: 25 }),
-      })
-      .regex(/^[a-z0-9_-]+$/, {
-        message: t("slug_format_message"),
-      }),
+    slug_value: slugSchema(),
     product_type: z.enum(ProductKnowledgeType),
     status: z.enum(ProductKnowledgeStatus),
     alternate_identifier: z.string().trim().optional(),
