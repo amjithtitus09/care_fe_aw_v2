@@ -64,7 +64,7 @@ import {
 import observationDefinitionApi from "@/types/emr/observationDefinition/observationDefinitionApi";
 import mutate from "@/Utils/request/mutate";
 import query from "@/Utils/request/query";
-import { generateSlug } from "@/Utils/utils";
+import { generateSlug, slugSchema } from "@/Utils/utils";
 import { ObservationInterpretation } from "./components/ObservationInterpretation";
 
 export default function ObservationDefinitionForm({
@@ -141,10 +141,7 @@ function ObservationDefinitionFormContent({
   const formSchema = z
     .object({
       title: z.string().min(1, t("field_required")),
-      slug_value: z
-        .string()
-        .min(5, t("character_count_validation", { min: 5, max: 25 }))
-        .max(25, t("character_count_validation", { min: 5, max: 25 })),
+      slug_value: slugSchema(),
       description: z.string().min(1, t("field_required")),
       status: z.enum(ObservationDefinitionStatus),
       category: z.enum(

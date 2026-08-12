@@ -1,6 +1,7 @@
 import careConfig from "@careConfig";
 import { differenceInMinutes, format } from "date-fns";
 import { t } from "i18next";
+import { z } from "zod";
 
 import dayjs from "@/Utils/dayjs";
 import { Time } from "@/Utils/types";
@@ -349,6 +350,37 @@ export function generateSlug(title: string, maxLength: number = 50): string {
       // Remove trailing hyphens after truncation
       .replace(/-+$/, "")
   );
+}
+
+/**
+ * Reusable zod schema for a slug value field.
+ *
+ * Centralizes the validation used across resource forms (charge item
+ * definitions, product knowledge, activity/observation/specimen definitions,
+ * value sets, resource categories, templates, etc.) so length limits, trimming
+ * and the allowed-character format stay consistent.
+ *
+ * @param options.min - Minimum length (default: 5)
+ * @param options.max - Maximum length (default: 25)
+ * @param options.regex - Allowed-character pattern (default: lowercase
+ *   letters, numbers, underscores and hyphens)
+ * @returns A zod string schema for slug values
+ */
+export function slugSchema(options?: {
+  min?: number;
+  max?: number;
+  regex?: RegExp;
+}) {
+  const min = options?.min ?? 5;
+  const max = options?.max ?? 25;
+  const regex = options?.regex ?? /^[a-z0-9_-]+$/;
+
+  return z
+    .string()
+    .trim()
+    .min(min, t("character_count_validation", { min, max }))
+    .max(max, t("character_count_validation", { min, max }))
+    .regex(regex, { message: t("slug_format_message") });
 }
 
 /**

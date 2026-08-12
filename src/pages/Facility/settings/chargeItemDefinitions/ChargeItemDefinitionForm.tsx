@@ -65,7 +65,7 @@ import facilityApi from "@/types/facility/facilityApi";
 import { round, zodDecimal } from "@/Utils/decimal";
 import mutate from "@/Utils/request/mutate";
 import query from "@/Utils/request/query";
-import { generateSlug, goBack } from "@/Utils/utils";
+import { generateSlug, goBack, slugSchema } from "@/Utils/utils";
 
 interface ChargeItemDefinitionFormProps {
   facilityId: string;
@@ -126,18 +126,7 @@ export function ChargeItemDefinitionForm({
         .string()
         .trim()
         .min(1, { message: t("title_is_required") }),
-      slug_value: z
-        .string()
-        .trim()
-        .min(5, {
-          message: t("character_count_validation", { min: 5, max: 25 }),
-        })
-        .max(25, {
-          message: t("character_count_validation", { min: 5, max: 25 }),
-        })
-        .regex(/^[a-z0-9_-]+$/, {
-          message: t("slug_format_message"),
-        }),
+      slug_value: slugSchema(),
       category: z.string().min(1, { message: t("field_required") }),
       _categoryName: z.string().optional(),
       status: z.enum(ChargeItemDefinitionStatus),
